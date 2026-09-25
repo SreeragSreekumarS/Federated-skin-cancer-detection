@@ -1,0 +1,9 @@
+# Install a CUDA-enabled PyTorch build matching your installed NVIDIA driver first.
+torch>=2.2
+torchvision>=0.17
+numpy>=1.26
+pandas>=2.1
+Pillow>=10.0
+scikit-learn>=1.4
+tqdm>=4.66
+PyYAML>=6.0
