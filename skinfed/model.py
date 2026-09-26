@@ -38,8 +38,12 @@ class AttentionMobileNetV3(nn.Module):
         self.avgpool = base.avgpool
         # A compact regularized head gives CBAM-refined features room to adapt to
         # dermoscopic classes without materially changing the lightweight backbone.
+        # MobileNetV3-Large's feature extractor emits 960 channels.  Its final
+        # ImageNet classifier later expands these to 1280 channels, so using the
+        # last classifier layer's input size here would not match `features`.
+        feature_dim = base.classifier[0].in_features
         self.classifier = nn.Sequential(
-            nn.Linear(base.classifier[-1].in_features, classifier_hidden_dim),
+            nn.Linear(feature_dim, classifier_hidden_dim),
             # LayerNorm remains valid for a final short client batch, unlike
             # BatchNorm1d which can fail when a simulated hospital has one sample.
             nn.LayerNorm(classifier_hidden_dim), nn.Hardswish(), nn.Dropout(classifier_dropout),

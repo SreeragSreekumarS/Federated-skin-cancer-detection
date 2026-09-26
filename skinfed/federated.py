@@ -49,9 +49,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.local_epochs))
     criterion = FocalCrossEntropy(class_weights.to(device), config.focal_gamma, config.label_smoothing)
     reference = {n: p.detach().clone() for n, p in model.named_parameters()} if config.fedprox_mu else {}
-    # cuda.amp is retained here for compatibility with PyTorch 2.2, which is
-    # common on GTX 1650 laptops. It is disabled automatically on CPU.
-    scaler = torch.cuda.amp.GradScaler(enabled=config.amp and device.type == "cuda")
+    # The scaler is disabled automatically when local training runs on CPU.
+    scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True, config.seed + round_number, config.strong_augmentation)
     model.train(); optimizer.zero_grad(set_to_none=True)
     for _ in range(config.local_epochs):
