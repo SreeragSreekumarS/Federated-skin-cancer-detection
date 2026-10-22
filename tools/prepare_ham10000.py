@@ -13,7 +13,9 @@ def main():
     meta, image_dir = pd.read_csv(args.metadata), Path(args.images)
     required = {"image_id", "dx"}
     if not required.issubset(meta): raise ValueError(f"metadata needs {required}")
-    paths = {p.stem: p for p in image_dir.rglob("*.jpg")}
+    # Store absolute paths: the manifest reader resolves relative entries from
+    # the manifest's directory, which may differ from the project root.
+    paths = {p.stem: p.resolve() for p in image_dir.rglob("*.jpg")}
     meta["image_path"] = meta.image_id.map(lambda image_id: str(paths.get(str(image_id), "")))
     meta = meta[meta.image_path.ne("")].copy()
     meta["label"] = meta.dx.astype(str)
