@@ -8,6 +8,7 @@ from skinfed.config import load_config, save_config
 from skinfed.data import make_federated_splits, read_manifest
 from skinfed.federated import aggregate, evaluate, train_client
 from skinfed.model import build_model
+from skinfed.plots import save_result_plots
 
 
 def seed_everything(seed: int):
@@ -77,17 +78,33 @@ def main():
                 print("Early stopping: validation macro-F1 did not improve."); break
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state"])
-    test_metrics, matrix = evaluate(model, frame, test_indices, config, device, class_names)
+    test_metrics, matrix, test_targets, test_probabilities = evaluate(
+        model, frame, test_indices, config, device, class_names, return_probabilities=True
+    )
     (output / "metrics.json").write_text(json.dumps({"validation_history": history, "test": test_metrics}, indent=2), encoding="utf-8")
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
     hospital_test_metrics = {}
+    hospital_matrices = {}
+    prediction_payload = {
+        "class_names": np.asarray(class_names),
+        "combined_targets": test_targets,
+        "combined_probabilities": test_probabilities,
+    }
     hospital_dir = output / "hospital_metrics"; hospital_dir.mkdir(exist_ok=True)
     for hospital, indices in enumerate(client_test_indices, 1):
-        metrics, hospital_matrix = evaluate(model, frame, indices, config, device, class_names)
+        metrics, hospital_matrix, hospital_targets, hospital_probabilities = evaluate(
+            model, frame, indices, config, device, class_names, return_probabilities=True
+        )
         hospital_test_metrics[f"hospital_{hospital}"] = metrics
+        hospital_matrices[f"hospital_{hospital}"] = hospital_matrix
+        prediction_payload[f"hospital_{hospital}_targets"] = hospital_targets
+        prediction_payload[f"hospital_{hospital}_probabilities"] = hospital_probabilities
         pd.DataFrame(hospital_matrix, index=class_names, columns=class_names).to_csv(
             hospital_dir / f"hospital_{hospital}_confusion_matrix.csv"
         )
+    np.savez_compressed(output / "test_predictions.npz", **prediction_payload)
+    save_result_plots(history, test_metrics, matrix, class_names, test_targets, test_probabilities,
+                      hospital_matrices, output)
     macro_f1 = np.array([metrics["macro_f1"] for metrics in hospital_test_metrics.values()])
     balanced_accuracy = np.array([metrics["balanced_accuracy"] for metrics in hospital_test_metrics.values()])
     hospital_report = {
@@ -99,6 +116,7 @@ def main():
         },
     }
     (output / "hospital_metrics.json").write_text(json.dumps(hospital_report, indent=2), encoding="utf-8")
+    print(f"Plots saved to: {output / 'plots'}")
     print(json.dumps(test_metrics, indent=2))
 
 

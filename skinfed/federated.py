@@ -53,15 +53,22 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True, config.seed + round_number, config.strong_augmentation)
     model.train(); optimizer.zero_grad(set_to_none=True)
+    train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):
         for step, (images, targets) in enumerate(loader, 1):
             images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
-                loss = criterion(model(images), targets)
+                logits = model(images)
+                task_loss = criterion(logits, targets)
+                loss = task_loss
                 if reference:
                     prox = sum((p - reference[n]).pow(2).sum() for n, p in model.named_parameters())
                     loss = loss + 0.5 * config.fedprox_mu * prox
                 loss = loss / config.gradient_accumulation
+            batch_size = targets.size(0)
+            train_loss_sum += float(task_loss.detach()) * batch_size
+            train_correct += int((logits.detach().argmax(dim=1) == targets).sum())
+            train_samples += batch_size
             scaler.scale(loss).backward()
             if step % config.gradient_accumulation == 0 or step == len(loader):
                 scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -69,6 +76,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
         scheduler.step()
     local_metrics, _ = evaluate(model, frame, val_indices, config, device, [str(x) for x in sorted(frame.label.astype(str).unique())])
     quality = local_metrics["macro_f1"]
+    local_metrics["train_accuracy"] = train_correct / max(1, train_samples)
+    local_metrics["train_loss"] = train_loss_sum / max(1, train_samples)
     update = state_cpu(model)
     del model
     if device.type == "cuda": torch.cuda.empty_cache()
@@ -76,7 +85,7 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
 
 
 @torch.inference_mode()
-def evaluate(model, frame, indices, config, device, class_names):
+def evaluate(model, frame, indices, config, device, class_names, return_probabilities=False):
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, False, config.seed,)
     model.eval(); probs, targets = [], []
     for images, labels in loader:
@@ -86,4 +95,8 @@ def evaluate(model, frame, indices, config, device, class_names):
             if config.tta:
                 logits = (logits + model(torch.flip(images, dims=[3]))) / 2
         probs.append(torch.softmax(logits, 1).float().cpu().numpy()); targets.extend(labels.numpy().tolist())
-    return classification_metrics(targets, np.concatenate(probs), class_names)
+    probabilities = np.concatenate(probs)
+    metrics, matrix = classification_metrics(targets, probabilities, class_names)
+    if return_probabilities:
+        return metrics, matrix, np.asarray(targets, dtype=int), probabilities
+    return metrics, matrix

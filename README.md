@@ -31,7 +31,9 @@ python train.py --manifest data\ham10000_manifest.csv --config config\gtx1650.ya
 
 The audit exits with status `1` when it finds duplicates. Review the CSV before training: remove accidental cross-dataset copies, resolve conflicting labels, and keep every duplicate group within one patient-level split. Near-duplicates are not automatically removed because doing so needs a clinical review.
 
-The first run downloads ImageNet weights. Training artifacts are kept in `runs/<name>/`: `best_model.pt`, `metrics.json`, `confusion_matrix.csv`, `hospital_metrics.json`, per-hospital confusion matrices in `hospital_metrics/`, and `class_names.json`. No raw images or per-client weights are copied there.
+The first run downloads ImageNet weights unless `--no-pretrained` is supplied. Training artifacts are kept in `runs/<name>/`: `best_model.pt`, `metrics.json`, `confusion_matrix.csv`, `hospital_metrics.json`, per-hospital confusion matrices in `hospital_metrics/`, class names, and `test_predictions.npz`. No raw images or per-client weights are copied there.
+
+Each completed training run also creates `runs/<name>/plots/` with client training accuracy/loss by federated round, global validation curves, combined and per-hospital held-out confusion-matrix heatmaps, per-class ROC AUC, ROC curves, and precision-recall curves. ROC and precision-recall curves are omitted for classes that do not have both positive and negative examples in the evaluated split. Client training curves are computed during local optimization; global curves use validation data, and final confusion matrices/ROC plots use held-out test data.
 
 Each simulated hospital receives non-IID train, validation, and held-out test subsets. `hospital_metrics.json` reports the final federated model's full test metrics for every hospital, the combined test metrics, mean/standard deviation across hospitals, and worst-hospital macro F1. `metrics.json` also records local validation metrics for each selected hospital in every training round.
 
@@ -39,7 +41,7 @@ Every metric report includes accuracy, balanced accuracy, micro/macro/weighted p
 
 ## Verify before using medical data
 
-Run `python tools/check_setup.py`. It must say `CUDA available: True` and identify the GTX 1650. Then run `python tools/smoke_test.py`. This creates temporary artificial images, performs one federated training round, checks evaluation and aggregation, prints `SMOKE TEST PASSED`, and leaves no data or model files behind.
+Run `python tools/check_setup.py`. For the GTX 1650 setup, confirm it identifies the GPU and reports `CUDA available: True`. On a CPU-only laptop, `CUDA available: False` is expected; continue with `python tools/smoke_test.py`. This creates temporary artificial images, performs one federated training round, checks evaluation and aggregation, prints `SMOKE TEST PASSED`, and leaves no data or model files behind.
 
 ## Tune safely
 
