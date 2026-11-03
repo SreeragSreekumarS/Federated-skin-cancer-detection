@@ -43,6 +43,40 @@ Every metric report includes accuracy, balanced accuracy, micro/macro/weighted p
 
 Run `python tools/check_setup.py`. For the GTX 1650 setup, confirm it identifies the GPU and reports `CUDA available: True`. On a CPU-only laptop, `CUDA available: False` is expected; continue with `python tools/smoke_test.py`. This creates temporary artificial images, performs one federated training round, checks evaluation and aggregation, prints `SMOKE TEST PASSED`, and leaves no data or model files behind.
 
+## Optional lesion segmentation preprocessing
+
+The ISIC 2018 Task 1 images and ground-truth masks can train an auxiliary U-Net. The segmenter can then predict lesion regions in HAM10000 and ISIC 2019 images and create padded lesion crops for a separate classifier run. It does not alter the original images or manifests. Segmentation can help focus the classifier, but accuracy gains are not guaranteed.
+
+From the project root, train the segmenter on the extracted ISIC 2018 folders:
+
+```bash
+python -m tools.train_segmenter \
+  --images data/ISIC2018_segmentation/images/ISIC2018_Task1-2_Training_Input \
+  --masks data/ISIC2018_segmentation/masks/ISIC2018_Task1_Training_GroundTruth \
+  --output runs/isic2018_segmenter/best_segmenter.pt \
+  --epochs 40 --batch-size 8 --size 256
+```
+
+Apply the trained segmenter to each classification dataset, then train with the new manifest:
+
+```bash
+python -m tools.apply_segmenter \
+  --manifest data/HAM10000/ham10000_manifest.csv \
+  --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
+  --output-dir data/HAM10000/segmented_images \
+  --output-manifest data/HAM10000/ham10000_segmented_manifest.csv
+python train.py --manifest data/HAM10000/ham10000_segmented_manifest.csv --config config/ham10000_gpu.yaml
+
+python -m tools.apply_segmenter \
+  --manifest data/ISIC2019/isic2019_manifest.csv \
+  --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
+  --output-dir data/ISIC2019/segmented_images \
+  --output-manifest data/ISIC2019/isic2019_segmented_manifest.csv
+python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --config config/isic2019_gpu.yaml
+```
+
+Keep the original manifests and baseline run outputs. Each classifier config uses the same fixed seed and split logic, so the original and segmented runs can be compared on the same held-out rows. Before claiming test performance, check for duplicate images between the ISIC 2018 segmenter training images and the HAM10000/ISIC 2019 test images; overlapping images can leak information into the evaluation. Review predicted crops from several images, especially rare or unusually large lesions, before relying on the segmented run.
+
 ## Tune safely
 
 - If CUDA reports out-of-memory, set `batch_size: 8` and `image_size: 144`.
