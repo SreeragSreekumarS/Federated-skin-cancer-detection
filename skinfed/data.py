@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import random
+from itertools import combinations
 import numpy as np
 import pandas as pd
 from PIL import Image
-from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, StratifiedShuffleSplit
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -38,21 +39,61 @@ def _split_indices(frame: pd.DataFrame, train: float, val: float, seed: int) -> 
     indices = np.arange(len(frame))
     groups = frame.patient_id.astype(str).to_numpy()
     labels = frame.target.to_numpy()
-    # GroupShuffleSplit is deliberate: it prevents a patient's images leaking across splits.
+    # Select grouped, stratified folds closest to the requested holdout size and
+    # class proportions. This keeps lesions together while reducing empty-class
+    # validation/test splits caused by unstratified group sampling.
     try:
-        outer = GroupShuffleSplit(n_splits=1, train_size=train, random_state=seed)
-        train_idx, holdout_idx = next(outer.split(indices, labels, groups))
-        holdout = frame.iloc[holdout_idx]
-        ratio = val / (1 - train)
-        inner = GroupShuffleSplit(n_splits=1, train_size=ratio, random_state=seed + 1)
-        val_rel, test_rel = next(inner.split(holdout, holdout.target, holdout.patient_id))
+        splitter = StratifiedGroupKFold(n_splits=10, shuffle=True, random_state=seed)
+        folds = [holdout for _, holdout in splitter.split(indices, labels, groups)]
+        class_counts = np.bincount(labels)
+        target_holdout = 1.0 - train
+
+        def split_cost(holdout_idx: np.ndarray, target_fraction: float) -> float:
+            size_error = abs(len(holdout_idx) / len(indices) - target_fraction)
+            held_counts = np.bincount(labels[holdout_idx], minlength=len(class_counts))
+            class_error = np.abs(held_counts / np.maximum(class_counts, 1) - target_fraction).mean()
+            missing_class_penalty = np.count_nonzero((class_counts > 0) & (held_counts == 0))
+            return size_error + class_error + missing_class_penalty
+
+        holdout_idx = min(
+            (np.concatenate([folds[i] for i in choice]) for choice in combinations(range(10), max(1, round(target_holdout * 10)))),
+            key=lambda candidate: split_cost(candidate, target_holdout),
+        )
+        train_idx = np.setdiff1d(indices, holdout_idx, assume_unique=False)
+        holdout_labels = labels[holdout_idx]
+        holdout_groups = groups[holdout_idx]
+        inner = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=seed + 1)
+        inner_splits = list(inner.split(holdout_idx, holdout_labels, holdout_groups))
+        val_ratio = val / (1.0 - train)
+
+        def inner_cost(val_rel: np.ndarray) -> float:
+            class_counts = np.bincount(holdout_labels, minlength=len(np.bincount(labels)))
+            val_counts = np.bincount(holdout_labels[val_rel], minlength=len(class_counts))
+            class_error = np.abs(val_counts / np.maximum(class_counts, 1) - val_ratio).mean()
+            missing_class_penalty = np.count_nonzero((class_counts > 0) & (val_counts == 0))
+            return abs(len(val_rel) / len(holdout_idx) - val_ratio) + class_error + missing_class_penalty
+
+        val_rel, test_rel = min(
+            ((a, b) for a, b in inner_splits),
+            key=lambda pair: inner_cost(pair[0]),
+        )
         return train_idx, holdout_idx[val_rel], holdout_idx[test_rel]
     except ValueError:
-        # Tiny synthetic datasets may not have enough groups. Still use stratification where possible.
+        # Small datasets may not have enough distinct groups for grouped stratification.
+        # Keep groups separate whenever possible; only fall back to sample stratification
+        # when a group-aware split cannot be formed at all.
         splitter = StratifiedShuffleSplit(n_splits=1, train_size=train, random_state=seed)
-        train_idx, holdout_idx = next(splitter.split(indices, labels))
-        splitter = StratifiedShuffleSplit(n_splits=1, train_size=val / (1 - train), random_state=seed + 1)
-        val_rel, test_rel = next(splitter.split(holdout_idx, labels[holdout_idx]))
+        try:
+            outer = GroupShuffleSplit(n_splits=1, train_size=train, random_state=seed)
+            train_idx, holdout_idx = next(outer.split(indices, labels, groups))
+        except ValueError:
+            train_idx, holdout_idx = next(splitter.split(indices, labels))
+        try:
+            inner = GroupShuffleSplit(n_splits=1, train_size=val / (1 - train), random_state=seed + 1)
+            val_rel, test_rel = next(inner.split(holdout_idx, labels[holdout_idx], groups[holdout_idx]))
+        except ValueError:
+            splitter = StratifiedShuffleSplit(n_splits=1, train_size=val / (1 - train), random_state=seed + 1)
+            val_rel, test_rel = next(splitter.split(holdout_idx, labels[holdout_idx]))
         return train_idx, holdout_idx[val_rel], holdout_idx[test_rel]
 
 

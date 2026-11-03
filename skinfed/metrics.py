@@ -9,6 +9,17 @@ from sklearn.metrics import (
 
 def classification_metrics(targets: list[int], probabilities: np.ndarray, class_names: list[str]) -> tuple[dict, np.ndarray]:
     y_true = np.asarray(targets)
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    if probabilities.ndim != 2 or probabilities.shape != (len(y_true), len(class_names)):
+        raise ValueError("Probability matrix shape must be (number of targets, number of classes)")
+    if not np.isfinite(probabilities).all() or (probabilities < 0).any():
+        raise ValueError("Predicted probabilities must be finite and non-negative")
+    row_sums = probabilities.sum(axis=1, keepdims=True)
+    if (row_sums <= 0).any():
+        raise ValueError("Each prediction must have positive total probability")
+    # Normalize after float32 inference/autocast to satisfy sklearn's strict
+    # multiclass probability validation and keep all metrics consistent.
+    probabilities = probabilities / row_sums
     y_pred = probabilities.argmax(axis=1)
     labels = np.arange(len(class_names))
     precision, recall, f1, support = precision_recall_fscore_support(y_true, y_pred, labels=labels, zero_division=0)
@@ -39,12 +50,11 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
         auc = roc_auc_score(y_true, probabilities, labels=labels, multi_class="ovr", average="macro")
     except ValueError:  # A held-out split without every class cannot define multiclass AUC.
         auc = None
-    try:
-        macro_average_precision = average_precision_score(
-            np.eye(len(labels), dtype=int)[y_true], probabilities, average="macro"
-        )
-    except ValueError:
-        macro_average_precision = None
+    valid_average_precisions = [
+        item["average_precision"] for item in per_class.values()
+        if item["average_precision"] is not None
+    ]
+    macro_average_precision = float(np.mean(valid_average_precisions)) if valid_average_precisions else None
     try:
         top_2_accuracy = top_k_accuracy_score(y_true, probabilities, k=min(2, len(labels)), labels=labels)
     except ValueError:

@@ -4,7 +4,7 @@ import copy, math, random
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from .data import LesionDataset, transforms_for
 from .metrics import classification_metrics
@@ -35,9 +35,20 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
     global_model.load_state_dict(merged, strict=True)
 
 
-def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False):
+def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
+                balanced_sampling=False):
     generator = torch.Generator().manual_seed(seed)
-    return DataLoader(LesionDataset(frame, indices, transforms_for(image_size, training, strong_augmentation)), batch_size=batch_size, shuffle=training,
+    sampler = None
+    if training and balanced_sampling:
+        targets = frame.iloc[indices].target.to_numpy()
+        counts = np.bincount(targets, minlength=int(frame.target.max()) + 1)
+        sample_weights = 1.0 / np.sqrt(np.maximum(counts[targets], 1))
+        sampler = WeightedRandomSampler(
+            torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(indices), replacement=True, generator=generator,
+        )
+    return DataLoader(LesionDataset(frame, indices, transforms_for(image_size, training, strong_augmentation)), batch_size=batch_size,
+                      shuffle=training and sampler is None, sampler=sampler,
                       num_workers=workers, pin_memory=True, persistent_workers=workers > 0, generator=generator)
 
 
@@ -47,11 +58,15 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     for parameter in model.features.parameters(): parameter.requires_grad = not frozen
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate or config.learning_rate, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.local_epochs))
-    criterion = FocalCrossEntropy(class_weights.to(device), config.focal_gamma, config.label_smoothing)
+    # Balanced sampling and inverse-frequency loss weights compound each other;
+    # use neutral class weights when batches are rebalanced.
+    loss_weights = torch.ones_like(class_weights) if config.balanced_sampling else class_weights
+    criterion = FocalCrossEntropy(loss_weights.to(device), config.focal_gamma, config.label_smoothing)
     reference = {n: p.detach().clone() for n, p in model.named_parameters()} if config.fedprox_mu else {}
     # The scaler is disabled automatically when local training runs on CPU.
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
-    loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True, config.seed + round_number, config.strong_augmentation)
+    loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True,
+                         config.seed + round_number, config.strong_augmentation, config.balanced_sampling)
     model.train(); optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):

@@ -37,6 +37,7 @@ class TrainConfig:
     tta: bool = True
     amp: bool = True
     strong_augmentation: bool = False
+    balanced_sampling: bool = False
 
     def validate(self) -> None:
         if self.clients < 2 or self.rounds < 1 or self.batch_size < 1:

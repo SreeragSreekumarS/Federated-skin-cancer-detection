@@ -1,7 +1,7 @@
 seed: 42
-run_name: isic2019_federated_mobilenetv3
+run_name: isic2019_balanced_mobilenetv3
 clients: 3
-dirichlet_alpha: 0.5
+dirichlet_alpha: 1.0
 rounds: 30
 client_fraction: 1.0
 local_epochs: 2
@@ -28,3 +28,4 @@ test_fraction: 0.15
 tta: true
 amp: true
 strong_augmentation: false
+balanced_sampling: true
