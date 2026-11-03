@@ -1,5 +1,5 @@
 seed: 42
-run_name: ham10000_federated_mobilenetv3
+run_name: ham10000_balanced_mobilenetv3
 clients: 3
 dirichlet_alpha: 0.5
 rounds: 30
@@ -28,3 +28,4 @@ test_fraction: 0.15
 tta: true
 amp: true
 strong_augmentation: false
+balanced_sampling: true
