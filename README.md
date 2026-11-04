@@ -77,6 +77,17 @@ python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --confi
 
 Keep the original manifests and baseline run outputs. Each classifier config uses the same fixed seed and split logic, so the original and segmented runs can be compared on the same held-out rows. Before claiming test performance, check for duplicate images between the ISIC 2018 segmenter training images and the HAM10000/ISIC 2019 test images; overlapping images can leak information into the evaluation. Review predicted crops from several images, especially rare or unusually large lesions, before relying on the segmented run.
 
+## Full-image 224 px classifier runs
+
+The HAM10000 and ISIC 2019 GPU configs use 224 px inputs. Classifier preprocessing preserves the complete original image and its proportions: it scales the image to fit a square and pads the remaining space, rather than cropping or stretching it. The configs also use new run names, so these higher-resolution runs do not replace earlier 160 px results. To run this full-image comparison, use each dataset's original manifest, not the optional `*_segmented_manifest.csv`:
+
+```bash
+python train.py --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
+python train.py --manifest data/ISIC2019/isic2019_manifest.csv --config config/isic2019_gpu.yaml
+```
+
+If GPU memory allows and 224 px improves the held-out metrics, change `image_size` to `256` in the relevant config and use a distinct `run_name` for that comparison. Higher resolution can help retain small visual details, but it does not guarantee better classification scores.
+
 ## Tune safely
 
 - If CUDA reports out-of-memory, set `batch_size: 8` and `image_size: 144`.

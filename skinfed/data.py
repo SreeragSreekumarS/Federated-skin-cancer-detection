@@ -5,7 +5,7 @@ import random
 from itertools import combinations
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, StratifiedShuffleSplit
 import torch
 from torch.utils.data import Dataset
@@ -133,14 +133,29 @@ def make_federated_splits(frame: pd.DataFrame, clients: int, alpha: float, train
     return client_train, client_val, client_test, val_idx, test_idx
 
 
+class ResizeWithPad:
+    """Resize the complete image to fit a square, padding without cropping or stretching."""
+    def __init__(self, image_size: int):
+        self.image_size = image_size
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        return ImageOps.pad(
+            image,
+            (self.image_size, self.image_size),
+            method=Image.Resampling.BICUBIC,
+            color=(123, 116, 103),
+            centering=(0.5, 0.5),
+        )
+
+
 def transforms_for(image_size: int, training: bool, strong_augmentation: bool = False):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     if training:
         augmentations = [
-            transforms.Resize(int(image_size * 1.12), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.RandomResizedCrop(image_size, scale=(0.82, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
+            ResizeWithPad(image_size),
             transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
-            transforms.RandomRotation(15), transforms.ColorJitter(0.12, 0.12, 0.08, 0.03),
+            transforms.RandomRotation(15, fill=(123, 116, 103)),
+            transforms.ColorJitter(0.12, 0.12, 0.08, 0.03),
         ]
         # Optional robustness transforms are deliberately conservative. Keep them
         # off by default because overly synthetic lesion images can hurt calibration.
@@ -154,8 +169,7 @@ def transforms_for(image_size: int, training: bool, strong_augmentation: bool = 
             augmentations.append(transforms.RandomErasing(p=0.10, scale=(0.01, 0.04), ratio=(0.5, 2.0)))
         return transforms.Compose(augmentations)
     return transforms.Compose([
-        transforms.Resize(int(image_size * 1.12), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(image_size), transforms.ToTensor(), normalize,
+        ResizeWithPad(image_size), transforms.ToTensor(), normalize,
     ])
 
 
