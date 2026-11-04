@@ -108,7 +108,11 @@ def main():
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=device.type == "cuda")
     model = UNet().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    # Use the current AMP API on recent PyTorch; retain support for older installs.
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
     best, stale = -1.0, 0
     for epoch in range(1, args.epochs + 1):
