@@ -88,6 +88,28 @@ python train.py --manifest data/ISIC2019/isic2019_manifest.csv --config config/i
 
 If GPU memory allows and 224 px improves the held-out metrics, change `image_size` to `256` in the relevant config and use a distinct `run_name` for that comparison. Higher resolution can help retain small visual details, but it does not guarantee better classification scores.
 
+## Classifier runs with segmentation
+
+After `runs/isic2018_segmenter/best_segmenter.pt` has been created, first apply it to each dataset's original manifest. Then train using the new segmented manifest and the matching segmented config. These commands create a lesion-centered crop with padding, and the classifier resizes that crop to 224 px while preserving its proportions:
+
+```bash
+python -m tools.apply_segmenter \
+  --manifest data/HAM10000/ham10000_manifest.csv \
+  --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
+  --output-dir data/HAM10000/segmented_images \
+  --output-manifest data/HAM10000/ham10000_segmented_manifest.csv
+python train.py --manifest data/HAM10000/ham10000_segmented_manifest.csv --config config/ham10000_segmented_224.yaml
+
+python -m tools.apply_segmenter \
+  --manifest data/ISIC2019/isic2019_manifest.csv \
+  --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
+  --output-dir data/ISIC2019/segmented_images \
+  --output-manifest data/ISIC2019/isic2019_segmented_manifest.csv
+python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --config config/isic2019_segmented_224.yaml
+```
+
+The segmented configs use separate run names and keep the original 224 px full-image configs available for comparison. Review some generated crops before training, and compare full-image and segmented results using the same split seed. Segmentation may improve focus, but an accuracy increase is not guaranteed.
+
 ## Tune safely
 
 - If CUDA reports out-of-memory, set `batch_size: 8` and `image_size: 144`.
