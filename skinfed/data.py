@@ -6,7 +6,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
-from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, StratifiedShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -78,59 +78,70 @@ def _split_indices(frame: pd.DataFrame, train: float, val: float, seed: int) -> 
             key=lambda pair: inner_cost(pair[0]),
         )
         return train_idx, holdout_idx[val_rel], holdout_idx[test_rel]
-    except ValueError:
-        # Small datasets may not have enough distinct groups for grouped stratification.
-        # Keep groups separate whenever possible; only fall back to sample stratification
-        # when a group-aware split cannot be formed at all.
-        splitter = StratifiedShuffleSplit(n_splits=1, train_size=train, random_state=seed)
+    except ValueError as error:
+        # Never fall back to row-level splitting: that can put images from the
+        # same patient/lesion in different partitions. For small clients use
+        # group-aware random splits, and fail clearly if three partitions cannot
+        # be formed from the available groups.
         try:
             outer = GroupShuffleSplit(n_splits=1, train_size=train, random_state=seed)
             train_idx, holdout_idx = next(outer.split(indices, labels, groups))
-        except ValueError:
-            train_idx, holdout_idx = next(splitter.split(indices, labels))
-        try:
             inner = GroupShuffleSplit(n_splits=1, train_size=val / (1 - train), random_state=seed + 1)
             val_rel, test_rel = next(inner.split(holdout_idx, labels[holdout_idx], groups[holdout_idx]))
-        except ValueError:
-            splitter = StratifiedShuffleSplit(n_splits=1, train_size=val / (1 - train), random_state=seed + 1)
-            val_rel, test_rel = next(splitter.split(holdout_idx, labels[holdout_idx]))
+        except ValueError as grouped_error:
+            raise ValueError(
+                "Cannot create train/validation/test partitions without splitting a patient/lesion group. "
+                "Provide more distinct patient_id values or adjust the split fractions."
+            ) from grouped_error
         return train_idx, holdout_idx[val_rel], holdout_idx[test_rel]
 
 
-def _dirichlet_partition(indices: np.ndarray, labels: np.ndarray, clients: int, alpha: float, rng: np.random.Generator) -> list[np.ndarray]:
-    """Allocate one split to simulated hospitals while retaining class imbalance."""
-    parts: list[list[int]] = [[] for _ in range(clients)]
-    for cls in np.unique(labels[indices]):
-        cls_idx = indices[labels[indices] == cls].copy()
-        rng.shuffle(cls_idx)
+def _assign_groups_to_hospitals(frame: pd.DataFrame, clients: int, alpha: float, seed: int) -> list[np.ndarray]:
+    """Assign every patient/lesion group to exactly one simulated hospital."""
+    rng = np.random.default_rng(seed)
+    labels = frame.target.to_numpy()
+    group_values = frame.patient_id.astype(str).to_numpy()
+    group_frame = pd.DataFrame({"group": group_values, "label": labels})
+    # A group's majority label drives non-IID allocation; tie-breaking is stable.
+    group_labels = group_frame.groupby("group")["label"].agg(
+        lambda values: int(values.value_counts().sort_index().idxmax())
+    )
+    hospitals: list[list[str]] = [[] for _ in range(clients)]
+    for cls in sorted(group_labels.unique()):
+        groups = group_labels.index[group_labels.to_numpy() == cls].to_numpy().copy()
+        rng.shuffle(groups)
         proportions = rng.dirichlet(np.repeat(alpha, clients))
-        cuts = (np.cumsum(proportions)[:-1] * len(cls_idx)).astype(int)
-        for client, shard in enumerate(np.split(cls_idx, cuts)):
-            parts[client].extend(shard.tolist())
-    # A hospital needs at least one example in each requested split to report a metric.
-    empty = [client for client, part in enumerate(parts) if not part]
-    for client in empty:
-        donor = max(range(clients), key=lambda candidate: len(parts[candidate]))
-        if len(parts[donor]) < 2:
-            raise ValueError("Not enough examples to allocate a non-empty split to every client")
-        parts[client].append(parts[donor].pop())
-    return [np.array(sorted(part), dtype=int) for part in parts]
+        cuts = (np.cumsum(proportions)[:-1] * len(groups)).astype(int)
+        for hospital, shard in enumerate(np.split(groups, cuts)):
+            hospitals[hospital].extend(shard.tolist())
+    # Ensure each simulated hospital has groups available for downstream splits.
+    empty = [hospital for hospital, groups in enumerate(hospitals) if not groups]
+    for hospital in empty:
+        donor = max(range(clients), key=lambda candidate: len(hospitals[candidate]))
+        if len(hospitals[donor]) < 4:
+            raise ValueError("Not enough patient/lesion groups to assign every hospital and create three splits")
+        hospitals[hospital].append(hospitals[donor].pop())
+    return [np.flatnonzero(np.isin(group_values, groups)) for groups in hospitals]
 
 
 def make_federated_splits(frame: pd.DataFrame, clients: int, alpha: float, train: float, val: float, seed: int):
     """Create non-IID hospital train/validation/test subsets plus combined indices.
 
-    Patients are separated before allocation, so no patient can appear in a
-    hospital's training and evaluation partitions. Hospital membership is a
-    simulation unless the input manifest supplies real institution identifiers.
+    Each patient/lesion group is assigned to one hospital first. Train,
+    validation, and test are then split independently within each hospital.
+    Hospital membership is simulated unless the manifest supplies institution IDs.
     """
-    train_idx, val_idx, test_idx = _split_indices(frame, train, val, seed)
-    rng = np.random.default_rng(seed)
-    labels = frame.target.to_numpy()
-    client_train = _dirichlet_partition(train_idx, labels, clients, alpha, rng)
-    client_val = _dirichlet_partition(val_idx, labels, clients, alpha, rng)
-    client_test = _dirichlet_partition(test_idx, labels, clients, alpha, rng)
-    return client_train, client_val, client_test, val_idx, test_idx
+    hospital_indices = _assign_groups_to_hospitals(frame, clients, alpha, seed)
+    client_train, client_val, client_test = [], [], []
+    for hospital, indices in enumerate(hospital_indices):
+        hospital_frame = frame.iloc[indices].reset_index(drop=True)
+        local_train, local_val, local_test = _split_indices(hospital_frame, train, val, seed + hospital)
+        client_train.append(indices[local_train])
+        client_val.append(indices[local_val])
+        client_test.append(indices[local_test])
+    val_indices = np.concatenate(client_val)
+    test_indices = np.concatenate(client_test)
+    return client_train, client_val, client_test, val_indices, test_indices
 
 
 class ResizeWithPad:

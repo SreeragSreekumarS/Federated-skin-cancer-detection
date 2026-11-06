@@ -8,8 +8,8 @@ This is a research tool, not a medical device. Do not use its output to diagnose
 
 ## What is improved over the reference paper
 
-- Patient-level train/validation/test separation prevents image/patient leakage.
-- Deterministic Dirichlet non-IID client splitting, class-balanced focal loss, pretrained transfer learning, and early stopping improve robust performance rather than training accuracy alone.
+- Patient/lesion groups are assigned to one simulated hospital first, then split into train/validation/test within that hospital, preventing group leakage across partitions.
+- Deterministic, class-dependent Dirichlet hospital assignment creates non-IID clients; class-balanced focal loss, pretrained transfer learning, and early stopping improve robust performance rather than training accuracy alone.
 - FedProx reduces client drift. Server aggregation considers sample count and validation quality.
 - Macro F1, balanced accuracy, per-class sensitivity/specificity, ROC-AUC, and a confusion matrix are reported, not only accuracy.
 - Mixed precision, 160 px inputs, bounded GPU memory, sequential client simulation, adaptive learning-rate reduction, and one best checkpoint keep it GTX-1650 friendly.
@@ -35,7 +35,17 @@ The first run downloads ImageNet weights unless `--no-pretrained` is supplied. T
 
 Each completed training run also creates `runs/<name>/plots/` with client training accuracy/loss by federated round, global validation curves, combined and per-hospital held-out confusion-matrix heatmaps, per-class ROC AUC, ROC curves, and precision-recall curves. ROC and precision-recall curves are omitted for classes that do not have both positive and negative examples in the evaluated split. Client training curves are computed during local optimization; global curves use validation data, and final confusion matrices/ROC plots use held-out test data.
 
-Each simulated hospital receives non-IID train, validation, and held-out test subsets. `hospital_metrics.json` reports the final federated model's full test metrics for every hospital, the combined test metrics, mean/standard deviation across hospitals, and worst-hospital macro F1. `metrics.json` also records local validation metrics for each selected hospital in every training round.
+Each patient/lesion is assigned to one simulated hospital before the hospital's own train, validation, and held-out test subsets are made. `hospital_metrics.json` reports the final federated model's full test metrics for every hospital, the combined test metrics, mean/standard deviation across hospitals, and worst-hospital macro F1. `metrics.json` also records local validation metrics for each selected hospital in every training round.
+
+## Centralized baseline
+
+Run the centralized comparison with the same manifest and config as the federated run:
+
+```bash
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
+```
+
+It uses the same deterministic hospital-first patient/lesion assignment and split, then pools only the hospital training subsets for centralized optimization. The model, image transforms, loss, optimizer, and validation-based checkpointing use the matching config; FedProx and server aggregation do not apply centrally. Validation and test rows are shared with the federated run. Results are saved separately under `runs/centralized/<run_name>/`, including `split_assignments.csv` so the exact rows can be audited. Compare combined test accuracy and balanced accuracy between the two runs to assess whether the observed limit is shared by the model/training recipe or specific to federation.
 
 Every metric report includes accuracy, balanced accuracy, micro/macro/weighted precision-recall-F1, one-vs-rest ROC-AUC, average precision, top-2 accuracy, Cohen's kappa, Matthews correlation coefficient, and log loss. For every class it includes precision (PPV), sensitivity/recall, specificity, negative predictive value, F1, ROC-AUC, average precision, false-positive/false-negative rates, TP/TN/FP/FN counts, and support. Confusion matrices are saved separately.
 
