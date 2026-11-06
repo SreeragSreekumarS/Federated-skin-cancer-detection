@@ -10,7 +10,7 @@ class TrainConfig:
     seed: int = 42
     run_name: str = "gtx1650_federated_mobilenetv3"
     clients: int = 3
-    dirichlet_alpha: float = 0.5
+    dirichlet_alpha: float = 1.0
     rounds: int = 30
     client_fraction: float = 1.0
     local_epochs: int = 2

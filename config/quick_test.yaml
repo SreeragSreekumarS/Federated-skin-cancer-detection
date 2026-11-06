@@ -1,7 +1,7 @@
 seed: 42
 run_name: ham10000_quick_test
 clients: 3
-dirichlet_alpha: 0.5
+dirichlet_alpha: 1.0
 rounds: 2
 client_fraction: 1.0
 local_epochs: 1

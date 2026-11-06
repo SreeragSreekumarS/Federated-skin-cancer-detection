@@ -1,7 +1,7 @@
 seed: 42
 run_name: ham10000_segmented_224_mobilenetv3
 clients: 3
-dirichlet_alpha: 0.5
+dirichlet_alpha: 1.0
 rounds: 30
 client_fraction: 1.0
 local_epochs: 2

@@ -20,7 +20,7 @@ from skinfed.model import build_model
 
 def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = TrainConfig(clients=3, dirichlet_alpha=8.0, rounds=1, local_epochs=1,
+    config = TrainConfig(clients=3, dirichlet_alpha=1.0, rounds=1, local_epochs=1,
                          batch_size=4, gradient_accumulation=1, num_workers=0,
                          image_size=96, early_stopping_patience=1, freeze_backbone_rounds=1,
                          amp=device.type == "cuda", tta=False)
