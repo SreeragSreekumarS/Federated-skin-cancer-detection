@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import torch
 from skinfed.config import load_config, save_config
-from skinfed.data import make_federated_splits, read_manifest
-from skinfed.federated import aggregate, evaluate, train_client
+from skinfed.data import cache_resized_images, make_federated_splits, read_manifest
+from skinfed.federated import ModelEMA, aggregate, evaluate, train_client
 from skinfed.model import build_model
 from skinfed.plots import save_result_plots
 
@@ -28,6 +28,10 @@ def main():
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
     frame, class_names = read_manifest(args.manifest)
+    if config.cache_resized_images:
+        cache_dir = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
+        print(f"Preparing resized-image cache at {cache_dir}")
+        frame = cache_resized_images(frame, config.image_size, cache_dir)
     client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_federated_splits(
         frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction, config.seed
     )
@@ -43,7 +47,11 @@ def main():
     counts = frame.iloc[np.concatenate(client_indices)].target.value_counts().reindex(range(len(class_names)), fill_value=1).to_numpy()
     weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32)
     model = build_model(len(class_names), pretrained=not args.no_pretrained, use_cbam=config.use_cbam,
-                        classifier_hidden_dim=config.classifier_hidden_dim, classifier_dropout=config.classifier_dropout).to(device)
+                        classifier_hidden_dim=config.classifier_hidden_dim, classifier_dropout=config.classifier_dropout,
+                        drop_path_rate=config.drop_path_rate).to(device)
+    # The server updates once per round, so its EMA decay is shorter than the
+    # per-optimizer-step EMA used by local/centralized trainers.
+    ema = ModelEMA(model, config.server_ema_decay)
     best_f1, stale, lr_stale, current_lr, history = -1.0, 0, 0, config.learning_rate, []
     for round_number in range(1, config.rounds + 1):
         rng = np.random.default_rng(config.seed + round_number)
@@ -54,7 +62,8 @@ def main():
             for i in selected
         ]
         aggregate(model, updates)
-        metrics, _ = evaluate(model, frame, val_indices, config, device, class_names)
+        ema.update(model)
+        metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
         metrics["round"] = round_number; metrics["learning_rate"] = current_lr; metrics["selected_hospitals"] = [int(x) + 1 for x in selected]
         metrics["local_validation"] = {
             f"hospital_{int(client) + 1}": update[3] for client, update in zip(selected, updates)
@@ -63,7 +72,7 @@ def main():
         print(f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, balanced accuracy={metrics['balanced_accuracy']:.4f}")
         if metrics["macro_f1"] > best_f1:
             best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
-            torch.save({"model_state": model.state_dict(), "class_names": class_names, "image_size": config.image_size,
+            torch.save({"model_state": ema.ema.state_dict(), "class_names": class_names, "image_size": config.image_size,
                         "classifier_hidden_dim": config.classifier_hidden_dim, "classifier_dropout": config.classifier_dropout}, output / "best_model.pt")
         else:
             stale += 1
@@ -77,9 +86,9 @@ def main():
             if stale >= config.early_stopping_patience:
                 print("Early stopping: validation macro-F1 did not improve."); break
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state"])
+    ema.ema.load_state_dict(checkpoint["model_state"])
     test_metrics, matrix, test_targets, test_probabilities = evaluate(
-        model, frame, test_indices, config, device, class_names, return_probabilities=True
+        ema.ema, frame, test_indices, config, device, class_names, return_probabilities=True
     )
     (output / "metrics.json").write_text(json.dumps({"validation_history": history, "test": test_metrics}, indent=2), encoding="utf-8")
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
@@ -93,7 +102,7 @@ def main():
     hospital_dir = output / "hospital_metrics"; hospital_dir.mkdir(exist_ok=True)
     for hospital, indices in enumerate(client_test_indices, 1):
         metrics, hospital_matrix, hospital_targets, hospital_probabilities = evaluate(
-            model, frame, indices, config, device, class_names, return_probabilities=True
+            ema.ema, frame, indices, config, device, class_names, return_probabilities=True
         )
         hospital_test_metrics[f"hospital_{hospital}"] = metrics
         hospital_matrices[f"hospital_{hospital}"] = hospital_matrix

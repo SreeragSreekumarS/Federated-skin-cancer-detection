@@ -21,11 +21,21 @@ class TrainConfig:
     use_cbam: bool = True
     classifier_hidden_dim: int = 256
     classifier_dropout: float = 0.30
-    learning_rate: float = 3e-4
+    # `learning_rate` is the classifier-head rate; feature layers use a lower
+    # base rate and layer-wise decay in optimizer_parameter_groups.
+    learning_rate: float = 1e-3
+    backbone_learning_rate: float = 1e-4
+    layerwise_lr_decay: float = 0.9
     lr_patience: int = 3
     lr_factor: float = 0.5
     min_learning_rate: float = 1e-6
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-2
+    drop_path_rate: float = 0.1
+    ema_decay: float = 0.995
+    server_ema_decay: float = 0.9
+    mixup_alpha: float = 0.2
+    cutmix_alpha: float = 1.0
+    mixup_cutmix_probability: float = 0.5
     fedprox_mu: float = 1e-3
     focal_gamma: float = 1.5
     label_smoothing: float = 0.05
@@ -38,6 +48,7 @@ class TrainConfig:
     amp: bool = True
     strong_augmentation: bool = False
     balanced_sampling: bool = False
+    cache_resized_images: bool = False
 
     def validate(self) -> None:
         if self.clients < 2 or self.rounds < 1 or self.batch_size < 1:
@@ -48,6 +59,16 @@ class TrainConfig:
             raise ValueError("classifier_hidden_dim must be positive and classifier_dropout must be in [0, 1)")
         if self.learning_rate <= 0 or self.min_learning_rate <= 0 or not 0 < self.lr_factor < 1 or self.lr_patience < 1:
             raise ValueError("learning-rate settings must be positive, lr_factor must be in (0, 1), and lr_patience must be positive")
+        if self.backbone_learning_rate <= 0 or not 0 < self.layerwise_lr_decay <= 1:
+            raise ValueError("backbone_learning_rate must be positive and layerwise_lr_decay must be in (0, 1]")
+        if self.weight_decay < 0 or not 0 <= self.drop_path_rate < 1:
+            raise ValueError("weight_decay must be non-negative and drop_path_rate must be in [0, 1)")
+        if not 0 < self.ema_decay < 1:
+            raise ValueError("ema_decay must be in (0, 1)")
+        if not 0 < self.server_ema_decay < 1:
+            raise ValueError("server_ema_decay must be in (0, 1)")
+        if self.mixup_alpha < 0 or self.cutmix_alpha < 0 or not 0 <= self.mixup_cutmix_probability <= 1:
+            raise ValueError("mixup/cutmix alpha values must be non-negative and probability must be in [0, 1]")
         if abs(self.train_fraction + self.val_fraction + self.test_fraction - 1) > 1e-6:
             raise ValueError("train_fraction + val_fraction + test_fraction must equal 1")
 

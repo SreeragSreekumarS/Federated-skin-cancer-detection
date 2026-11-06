@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import os
+import threading
 from pathlib import Path
 import random
 from itertools import combinations
@@ -159,11 +163,56 @@ class ResizeWithPad:
         )
 
 
-def transforms_for(image_size: int, training: bool, strong_augmentation: bool = False):
+def cache_resized_images(frame: pd.DataFrame, image_size: int, cache_dir: str | Path) -> pd.DataFrame:
+    """Create reusable square-resized JPEGs and return a frame pointing at them."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source_to_cache: dict[str, str] = {}
+    jobs: dict[str, tuple[Path, Path]] = {}
+    for value in frame.image_path.astype(str).unique():
+        source = Path(value).resolve()
+        stat = source.stat()
+        key_source = f"{source}|{stat.st_size}|{stat.st_mtime_ns}|{image_size}"
+        key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()
+        cached = cache_dir / f"{key}.jpg"
+        source_to_cache[value] = str(cached)
+        if not cached.is_file():
+            jobs[str(cached)] = (source, cached)
+
+    def resize_one(source: Path, cached: Path) -> None:
+        with Image.open(source) as image:
+            resized = ResizeWithPad(image_size)(image.convert("RGB"))
+            temporary = cached.with_name(
+                f"{cached.stem}.tmp-{os.getpid()}-{threading.get_ident()}.jpg"
+            )
+            resized.save(temporary, format="JPEG", quality=95)
+            temporary.replace(cached)
+
+    if jobs:
+        workers = min(8, max(1, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(resize_one, source, cached) for source, cached in jobs.values()]
+            for completed, future in enumerate(as_completed(futures), 1):
+                future.result()
+                if completed % 1000 == 0 or completed == len(futures):
+                    print(f"Resized cache: {completed}/{len(futures)} images")
+    result = frame.copy()
+    if "source_image_path" not in result:
+        result["source_image_path"] = result.image_path.astype(str)
+    result["image_path"] = result.image_path.astype(str).map(source_to_cache)
+    return result
+
+
+def transforms_for(
+    image_size: int,
+    training: bool,
+    strong_augmentation: bool = False,
+    already_resized: bool = False,
+):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     if training:
         augmentations = [
-            ResizeWithPad(image_size),
+            *([] if already_resized else [ResizeWithPad(image_size)]),
             transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
             transforms.RandomRotation(15, fill=(123, 116, 103)),
             transforms.ColorJitter(0.12, 0.12, 0.08, 0.03),
@@ -179,9 +228,8 @@ def transforms_for(image_size: int, training: bool, strong_augmentation: bool = 
         if strong_augmentation:
             augmentations.append(transforms.RandomErasing(p=0.10, scale=(0.01, 0.04), ratio=(0.5, 2.0)))
         return transforms.Compose(augmentations)
-    return transforms.Compose([
-        ResizeWithPad(image_size), transforms.ToTensor(), normalize,
-    ])
+    preprocessing = [] if already_resized else [ResizeWithPad(image_size)]
+    return transforms.Compose([*preprocessing, transforms.ToTensor(), normalize])
 
 
 class LesionDataset(Dataset):

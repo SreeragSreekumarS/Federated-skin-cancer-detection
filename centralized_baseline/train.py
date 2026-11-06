@@ -11,8 +11,11 @@ import pandas as pd
 import torch
 
 from skinfed.config import load_config, save_config
-from skinfed.data import _split_indices, read_manifest
-from skinfed.federated import FocalCrossEntropy, evaluate, make_loader
+from skinfed.data import _split_indices, cache_resized_images, read_manifest
+from skinfed.federated import (
+    FocalCrossEntropy, ModelEMA, evaluate, make_loader,
+    mixup_cutmix, optimizer_parameter_groups,
+)
 from skinfed.model import build_model
 from skinfed.plots import save_result_plots
 
@@ -44,6 +47,10 @@ def main() -> None:
         print(f"Using {torch.cuda.get_device_name(0)}")
 
     frame, class_names = read_manifest(args.manifest)
+    if config.cache_resized_images:
+        cache_dir = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
+        print(f"Preparing resized-image cache at {cache_dir}")
+        frame = cache_resized_images(frame, config.image_size, cache_dir)
     train_indices, val_indices, test_indices = _split_indices(
         frame, config.train_fraction, config.val_fraction, config.seed
     )
@@ -61,7 +68,7 @@ def main() -> None:
             row = frame.iloc[int(index)]
             assignments.append({
                 "manifest_index": int(index),
-                "image_path": row.image_path,
+                "image_path": getattr(row, "source_image_path", row.image_path),
                 "label": row.label,
                 "patient_id": row.patient_id,
                 "split": split_name,
@@ -93,7 +100,9 @@ def main() -> None:
         use_cbam=config.use_cbam,
         classifier_hidden_dim=config.classifier_hidden_dim,
         classifier_dropout=config.classifier_dropout,
+        drop_path_rate=config.drop_path_rate,
     ).to(device)
+    ema = ModelEMA(model, config.ema_decay)
     for parameter in model.features.parameters():
         parameter.requires_grad = config.freeze_backbone_rounds == 0
     scaler = torch.amp.GradScaler(
@@ -110,8 +119,8 @@ def main() -> None:
         for parameter in model.features.parameters():
             parameter.requires_grad = not frozen
         optimizer = torch.optim.AdamW(
-            filter(lambda parameter: parameter.requires_grad, model.parameters()),
-            lr=current_lr, weight_decay=config.weight_decay,
+            optimizer_parameter_groups(model, config, current_lr),
+            weight_decay=config.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=max(1, config.local_epochs)
@@ -120,6 +129,7 @@ def main() -> None:
             frame, train_indices, config.image_size, config.batch_size,
             config.num_workers, True, config.seed + round_number,
             config.strong_augmentation, config.balanced_sampling,
+            config.cache_resized_images,
         )
         model.train()
         for _ in range(config.local_epochs):
@@ -127,11 +137,16 @@ def main() -> None:
             for step, (images, targets) in enumerate(loader, 1):
                 images = images.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
+                images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
                 with torch.autocast(
                     device_type=device.type,
                     enabled=config.amp and device.type == "cuda",
                 ):
-                    loss = criterion(model(images), targets) / config.gradient_accumulation
+                    logits = model(images)
+                    loss = criterion(logits, targets_a)
+                    if targets_b is not None:
+                        loss = mix_lambda * loss + (1 - mix_lambda) * criterion(logits, targets_b)
+                    loss = loss / config.gradient_accumulation
                 scaler.scale(loss).backward()
                 if step % config.gradient_accumulation == 0 or step == len(loader):
                     scaler.unscale_(optimizer)
@@ -139,9 +154,10 @@ def main() -> None:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
+                    ema.update(model)
             scheduler.step()
 
-        metrics, _ = evaluate(model, frame, val_indices, config, device, class_names)
+        metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
         metrics.update({"round": round_number, "learning_rate": current_lr})
         history.append(metrics)
         print(
@@ -151,7 +167,7 @@ def main() -> None:
         if metrics["macro_f1"] > best_f1:
             best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
             torch.save({
-                "model_state": model.state_dict(),
+                "model_state": ema.ema.state_dict(),
                 "class_names": class_names,
                 "image_size": config.image_size,
                 "classifier_hidden_dim": config.classifier_hidden_dim,
@@ -170,9 +186,9 @@ def main() -> None:
                 break
 
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state"])
+    ema.ema.load_state_dict(checkpoint["model_state"])
     test_metrics, matrix, targets, probabilities = evaluate(
-        model, frame, test_indices, config, device, class_names,
+        ema.ema, frame, test_indices, config, device, class_names,
         return_probabilities=True,
     )
     (output / "metrics.json").write_text(

@@ -1,7 +1,9 @@
 from __future__ import annotations
+from types import MethodType
 import torch
 import torch.nn as nn
 from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
+from torchvision.ops import StochasticDepth
 
 
 class CBAM(nn.Module):
@@ -56,11 +58,28 @@ class AttentionMobileNetV3(nn.Module):
 
 
 def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True,
-                classifier_hidden_dim: int = 256, classifier_dropout: float = 0.30) -> nn.Module:
+                classifier_hidden_dim: int = 256, classifier_dropout: float = 0.30,
+                drop_path_rate: float = 0.10) -> nn.Module:
     weights = MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained else None
+    base = mobilenet_v3_large(weights=weights)
+    residual_blocks = [
+        module for module in base.features
+        if getattr(module, "use_res_connect", False) and hasattr(module, "block")
+    ]
+    if drop_path_rate and residual_blocks:
+        denominator = max(1, len(residual_blocks) - 1)
+        for index, module in enumerate(residual_blocks):
+            probability = drop_path_rate * index / denominator
+            module.add_module("drop_path", StochasticDepth(probability, mode="row"))
+            module.forward = MethodType(_stochastic_residual_forward, module)
     return AttentionMobileNetV3(
-        mobilenet_v3_large(weights=weights), num_classes, use_cbam, classifier_hidden_dim, classifier_dropout
+        base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout
     )
+
+
+def _stochastic_residual_forward(module: nn.Module, images: torch.Tensor) -> torch.Tensor:
+    residual = module.block(images)
+    return module.drop_path(residual) + images
 
 
 def freeze_features(model: nn.Module, frozen: bool) -> None:
