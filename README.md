@@ -12,7 +12,7 @@ This is a research tool, not a medical device. Do not use its output to diagnose
 - Deterministic, class-dependent Dirichlet hospital assignment creates non-IID clients; class-balanced focal loss, pretrained transfer learning, and early stopping improve robust performance rather than training accuracy alone.
 - FedProx reduces client drift. Server aggregation considers sample count and validation quality.
 - Macro F1, balanced accuracy, per-class sensitivity/specificity, ROC-AUC, and a confusion matrix are reported, not only accuracy.
-- Mixed precision, configurable input sizes (160 px for the GTX-1650 profile and 288 px for the full HAM10000/ISIC 2019 profiles), bounded GPU memory, sequential client simulation, adaptive learning-rate reduction, and one best checkpoint support the supplied hardware profiles.
+- All classifier configs use 288 px inputs. Mixed precision, bounded GPU memory, sequential client simulation, adaptive learning-rate reduction, and gradient accumulation support the supplied hardware profiles.
 - The optional CBAM head adapts the attention idea from multi-task lesion research to a classification-only dataset. A compact LayerNorm/dropout classifier head regularizes the CBAM-refined features without failing on small hospital batches. It does **not** claim segmentation, because segmentation masks are not part of this project's manifest.
 - `tools/audit_manifest.py` identifies exact visual duplicates before combining datasets or splitting by patient, addressing the duplicate-image risk highlighted in transformer dataset research.
 
@@ -102,7 +102,7 @@ If GPU memory allows and 288 px improves held-out metrics, change `image_size` t
 
 ## Classifier runs with segmentation
 
-After `runs/isic2018_segmenter/best_segmenter.pt` has been created, first apply it to each dataset's original manifest. Then train using the new segmented manifest and the matching segmented config. These commands create a lesion-centered crop with padding, and the classifier resizes that crop to 224 px while preserving its proportions:
+After `runs/isic2018_segmenter/best_segmenter.pt` has been created, first apply it to each dataset's original manifest. Then train using the new segmented manifest and the matching segmented config. These commands create a lesion-centered crop with padding, and the classifier resizes that crop to 288 px while preserving its proportions:
 
 ```bash
 python -m tools.apply_segmenter \
@@ -110,24 +110,24 @@ python -m tools.apply_segmenter \
   --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
   --output-dir data/HAM10000/segmented_images \
   --output-manifest data/HAM10000/ham10000_segmented_manifest.csv
-python train.py --manifest data/HAM10000/ham10000_segmented_manifest.csv --config config/ham10000_segmented_224.yaml
+python train.py --manifest data/HAM10000/ham10000_segmented_manifest.csv --config config/ham10000_segmented_288.yaml
 
 python -m tools.apply_segmenter \
   --manifest data/ISIC2019/isic2019_manifest.csv \
   --checkpoint runs/isic2018_segmenter/best_segmenter.pt \
   --output-dir data/ISIC2019/segmented_images \
   --output-manifest data/ISIC2019/isic2019_segmented_manifest.csv
-python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --config config/isic2019_segmented_224.yaml
+python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --config config/isic2019_segmented_288.yaml
 ```
 
-The segmented configs retain 224 px inputs as a separate comparison to the 288 px full-image configs. Review some generated crops before training. Segmentation may improve focus, but an accuracy increase is not guaranteed.
+The segmented configs use the same 288 px input size as the full-image configs. Review some generated crops before training. Segmentation may improve focus, but an accuracy increase is not guaranteed.
 
 ## Tune safely
 
-- If CUDA reports out-of-memory, set `batch_size: 8` and `image_size: 144`.
+- If CUDA reports out-of-memory, keep `image_size: 288`, reduce `batch_size`, and raise `gradient_accumulation` to preserve the effective batch size.
 - Start with `rounds: 8` to verify data. The default 30 rounds is a realistic fine-tuning run, not a claim of clinical readiness.
 - Use `clients: 3` to reproduce the paper's simulation. Federated simulation is not a substitute for real institutional deployment; raw data still stays in each configured local client in a real deployment.
-- Set `use_cbam: false` if you need the original MobileNetV3 head for an ablation. For 4 GB VRAM, use `config/gtx1650.yaml` with its 160 px input; the 288 px HAM10000 and ISIC 2019 profiles need more memory.
+- Set `use_cbam: false` if you need the original MobileNetV3 head for an ablation. The GTX 1650 profile also uses 288 px inputs with a smaller batch and gradient accumulation; 4 GB VRAM may still require further batch-size reduction.
 - The GPU configs enable strong augmentation and apply MixUp or CutMix to half of training batches. Weight decay is `0.01`; stochastic depth is applied through MobileNetV3 residual blocks.
 - `learning_rate` sets the classifier-head rate (`0.001`). The backbone starts at `backbone_learning_rate: 0.0001`, with `layerwise_lr_decay` reducing rates for earlier feature layers. Validation-driven reductions scale all rates together.
 - Validation and final test metrics use EMA weights rather than raw weights. Local and centralized EMAs update per optimizer step (`ema_decay: 0.995`); the federated server EMA updates once per round (`server_ema_decay: 0.9`).

@@ -8,7 +8,7 @@ local_epochs: 1
 batch_size: 16
 gradient_accumulation: 2
 num_workers: 2
-image_size: 160
+image_size: 288
 use_cbam: true
 learning_rate: 0.001
 weight_decay: 0.01

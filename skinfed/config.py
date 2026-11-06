@@ -17,7 +17,7 @@ class TrainConfig:
     batch_size: int = 16
     gradient_accumulation: int = 2
     num_workers: int = 2
-    image_size: int = 160
+    image_size: int = 288
     use_cbam: bool = True
     classifier_hidden_dim: int = 256
     classifier_dropout: float = 0.30

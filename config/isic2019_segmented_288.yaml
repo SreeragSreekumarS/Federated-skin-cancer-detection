@@ -1,5 +1,5 @@
 seed: 42
-run_name: ham10000_segmented_224_mobilenetv3
+run_name: isic2019_segmented_288_mobilenetv3
 clients: 3
 dirichlet_alpha: 1.0
 rounds: 30
@@ -8,7 +8,7 @@ local_epochs: 2
 batch_size: 16
 gradient_accumulation: 2
 num_workers: 2
-image_size: 224
+image_size: 288
 use_cbam: true
 classifier_hidden_dim: 256
 classifier_dropout: 0.30
