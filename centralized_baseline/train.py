@@ -1,4 +1,4 @@
-"""Train the same classifier centrally on the exact federated training split."""
+"""Train the same classifier centrally using one global group-aware split."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 from skinfed.config import load_config, save_config
-from skinfed.data import make_federated_splits, read_manifest
+from skinfed.data import _split_indices, read_manifest
 from skinfed.federated import FocalCrossEntropy, evaluate, make_loader
 from skinfed.model import build_model
 from skinfed.plots import save_result_plots
@@ -27,7 +27,7 @@ def seed_everything(seed: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a centralized baseline using the federated model and split"
+        description="Train one centralized model using a global patient/lesion split"
     )
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--config", default="config/gtx1650.yaml")
@@ -44,37 +44,35 @@ def main() -> None:
         print(f"Using {torch.cuda.get_device_name(0)}")
 
     frame, class_names = read_manifest(args.manifest)
-    client_train, client_val, client_test, val_indices, test_indices = make_federated_splits(
-        frame, config.clients, config.dirichlet_alpha,
-        config.train_fraction, config.val_fraction, config.seed,
+    train_indices, val_indices, test_indices = _split_indices(
+        frame, config.train_fraction, config.val_fraction, config.seed
     )
-    # These indices are exactly those used by train.py. Pooling happens only
-    # after the fixed patient-to-hospital assignments and within-hospital splits.
-    train_indices = np.concatenate(client_train)
     output = Path(args.output) / config.run_name
     output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
     (output / "class_names.json").write_text(json.dumps(class_names, indent=2), encoding="utf-8")
     assignments = []
-    for hospital, split_lists in enumerate(zip(client_train, client_val, client_test), 1):
-        for split_name, indices in zip(("train", "validation", "test"), split_lists):
-            for index in indices:
-                row = frame.iloc[int(index)]
-                assignments.append({
-                    "manifest_index": int(index),
-                    "image_path": row.image_path,
-                    "label": row.label,
-                    "patient_id": row.patient_id,
-                    "hospital": hospital,
-                    "split": split_name,
-                })
+    for split_name, indices in (
+        ("train", train_indices),
+        ("validation", val_indices),
+        ("test", test_indices),
+    ):
+        for index in indices:
+            row = frame.iloc[int(index)]
+            assignments.append({
+                "manifest_index": int(index),
+                "image_path": row.image_path,
+                "label": row.label,
+                "patient_id": row.patient_id,
+                "split": split_name,
+            })
     pd.DataFrame(assignments).sort_values("manifest_index").to_csv(
         output / "split_assignments.csv", index=False
     )
     pd.DataFrame({
         "split": ["train", "validation", "test"],
         "images": [len(train_indices), len(val_indices), len(test_indices)],
-        "patients_or_lesions": [
+        "patient_or_lesion_groups": [
             frame.iloc[idx].patient_id.astype(str).nunique()
             for idx in (train_indices, val_indices, test_indices)
         ],
@@ -105,9 +103,8 @@ def main() -> None:
     best_f1, stale, lr_stale = -1.0, 0, 0
     current_lr = config.learning_rate
     history: list[dict] = []
-    # Each centralized round makes local_epochs passes through the pooled
-    # training set, matching the per-example number of passes in a full-client
-    # federated round. Validation and early stopping remain round-based.
+    # Each centralized round makes local_epochs passes through the full global
+    # training partition. Validation and early stopping remain round-based.
     for round_number in range(1, config.rounds + 1):
         frozen = round_number <= config.freeze_backbone_rounds
         for parameter in model.features.parameters():
@@ -185,48 +182,16 @@ def main() -> None:
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(
         output / "confusion_matrix.csv"
     )
-    test_by_hospital: dict[str, dict] = {}
-    hospital_matrices: dict[str, np.ndarray] = {}
     predictions: dict[str, np.ndarray] = {
         "class_names": np.asarray(class_names),
-        "combined_targets": targets,
-        "combined_probabilities": probabilities,
+        "targets": targets,
+        "probabilities": probabilities,
     }
-    hospital_dir = output / "hospital_metrics"
-    hospital_dir.mkdir(exist_ok=True)
-    for hospital, indices in enumerate(client_test, 1):
-        key = f"hospital_{hospital}"
-        metrics, hospital_matrix, hospital_targets, hospital_probs = evaluate(
-            model, frame, indices, config, device, class_names,
-            return_probabilities=True,
-        )
-        test_by_hospital[key] = metrics
-        hospital_matrices[key] = hospital_matrix
-        predictions[f"{key}_targets"] = hospital_targets
-        predictions[f"{key}_probabilities"] = hospital_probs
-        pd.DataFrame(hospital_matrix, index=class_names, columns=class_names).to_csv(
-            hospital_dir / f"{key}_confusion_matrix.csv"
-        )
     np.savez_compressed(output / "test_predictions.npz", **predictions)
     save_result_plots(
         history, test_metrics, matrix, class_names, targets, probabilities,
-        hospital_matrices, output,
+        {}, output,
     )
-    macro_f1 = np.asarray([item["macro_f1"] for item in test_by_hospital.values()])
-    balanced_accuracy = np.asarray(
-        [item["balanced_accuracy"] for item in test_by_hospital.values()]
-    )
-    (output / "hospital_metrics.json").write_text(json.dumps({
-        "final_centralized_model_by_hospital": test_by_hospital,
-        "combined_test": test_metrics,
-        "hospital_summary": {
-            "macro_f1_mean": float(macro_f1.mean()),
-            "macro_f1_std": float(macro_f1.std()),
-            "worst_hospital_macro_f1": float(macro_f1.min()),
-            "balanced_accuracy_mean": float(balanced_accuracy.mean()),
-            "balanced_accuracy_std": float(balanced_accuracy.std()),
-        },
-    }, indent=2), encoding="utf-8")
     print(f"Centralized baseline saved to: {output}")
     print(json.dumps(test_metrics, indent=2))
 
