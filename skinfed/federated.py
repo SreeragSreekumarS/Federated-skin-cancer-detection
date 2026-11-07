@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from .data import LesionDataset, transforms_for
 from .metrics import classification_metrics
+from .model import freeze_features, model_backbone_layers
 
 
 class FocalCrossEntropy(nn.Module):
@@ -45,9 +46,10 @@ def optimizer_parameter_groups(model: nn.Module, config, head_learning_rate: flo
     """Use a higher classifier-head LR and layer-wise decay through features."""
     scale = head_learning_rate / config.learning_rate
     groups = []
-    feature_layers = list(model.features.children())
-    last_layer = max(0, len(feature_layers) - 1)
-    for layer_index, layer in enumerate(feature_layers):
+    backbone_layers = model_backbone_layers(model)
+    backbone_ids = {id(parameter) for layer in backbone_layers for parameter in layer.parameters()}
+    last_layer = max(0, len(backbone_layers) - 1)
+    for layer_index, layer in enumerate(backbone_layers):
         parameters = [parameter for parameter in layer.parameters() if parameter.requires_grad]
         if parameters:
             layer_rate = config.backbone_learning_rate * scale * (
@@ -56,7 +58,7 @@ def optimizer_parameter_groups(model: nn.Module, config, head_learning_rate: flo
             groups.append({"params": parameters, "lr": layer_rate})
     head_parameters = [
         parameter for name, parameter in model.named_parameters()
-        if not name.startswith("features.") and parameter.requires_grad
+        if id(parameter) not in backbone_ids and parameter.requires_grad
     ]
     if head_parameters:
         groups.append({"params": head_parameters, "lr": head_learning_rate})
@@ -126,7 +128,7 @@ def mixup_cutmix(images: torch.Tensor, targets: torch.Tensor, config):
 def train_client(global_model, frame, indices, val_indices, config, device, class_weights, round_number, learning_rate=None):
     model = copy.deepcopy(global_model).to(device)
     frozen = round_number <= config.freeze_backbone_rounds
-    for parameter in model.features.parameters(): parameter.requires_grad = not frozen
+    freeze_features(model, frozen)
     effective_lr = learning_rate or config.learning_rate
     optimizer = torch.optim.AdamW(
         optimizer_parameter_groups(model, config, effective_lr),
@@ -183,22 +185,48 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     return update, len(indices), quality, local_metrics
 
 
+def dihedral_views(images: torch.Tensor, count: int) -> list[torch.Tensor]:
+    """Build the 8 square symmetries used by dihedral test-time augmentation."""
+    if count == 1:
+        return [images]
+    horizontal = torch.flip(images, dims=[3])
+    if count == 2:
+        return [images, horizontal]
+    vertical = torch.flip(images, dims=[2])
+    both = torch.flip(images, dims=[2, 3])
+    all_views = [images, horizontal, vertical, both]
+    if count == 4:
+        return all_views
+    transposed = images.transpose(2, 3)
+    all_views.extend([
+        transposed, torch.flip(transposed, dims=[3]),
+        torch.flip(transposed, dims=[2]), torch.flip(transposed, dims=[2, 3]),
+    ])
+    return all_views[:count]
+
+
 @torch.inference_mode()
-def evaluate(model, frame, indices, config, device, class_names, return_probabilities=False):
+def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, np.ndarray]:
     loader = make_loader(
         frame, indices, config.image_size, config.batch_size, config.num_workers,
         False, config.seed, cache_resized=config.cache_resized_images,
     )
-    model.eval(); probs, targets = [], []
+    model.eval(); logits_all, targets = [], []
+    view_count = config.tta_views if config.tta else 1
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
-            logits = model(images)
-            if config.tta:
-                logits = (logits + model(torch.flip(images, dims=[3]))) / 2
-        probs.append(torch.softmax(logits, 1).float().cpu().numpy()); targets.extend(labels.numpy().tolist())
-    probabilities = np.concatenate(probs)
+            logits = torch.stack([model(view) for view in dihedral_views(images, view_count)]).mean(dim=0)
+        logits_all.append(logits.float().cpu().numpy())
+        targets.extend(labels.numpy().tolist())
+    return np.concatenate(logits_all), np.asarray(targets, dtype=int)
+
+
+@torch.inference_mode()
+def evaluate(model, frame, indices, config, device, class_names, return_probabilities=False):
+    logits, targets = predict_logits(model, frame, indices, config, device)
+    probabilities = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
     metrics, matrix = classification_metrics(targets, probabilities, class_names)
     if return_probabilities:
-        return metrics, matrix, np.asarray(targets, dtype=int), probabilities
+        return metrics, matrix, targets, probabilities
     return metrics, matrix

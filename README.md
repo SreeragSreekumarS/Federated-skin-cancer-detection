@@ -12,7 +12,7 @@ This is a research tool, not a medical device. Do not use its output to diagnose
 - Deterministic, class-dependent Dirichlet hospital assignment creates non-IID clients; class-balanced focal loss, pretrained transfer learning, and early stopping improve robust performance rather than training accuracy alone.
 - FedProx reduces client drift. Server aggregation considers sample count and validation quality.
 - Macro F1, balanced accuracy, per-class sensitivity/specificity, ROC-AUC, and a confusion matrix are reported, not only accuracy.
-- All classifier configs use 288 px inputs. Mixed precision, bounded GPU memory, sequential client simulation, adaptive learning-rate reduction, and gradient accumulation support the supplied hardware profiles.
+- The supplied classifier profiles cover 288, 320, and 384 px inputs. Mixed precision, resized-image caching, sequential client simulation, adaptive learning-rate reduction, and gradient accumulation support the supplied hardware profiles.
 - The optional CBAM head adapts the attention idea from multi-task lesion research to a classification-only dataset. A compact LayerNorm/dropout classifier head regularizes the CBAM-refined features without failing on small hospital batches. It does **not** claim segmentation, because segmentation masks are not part of this project's manifest.
 - `tools/audit_manifest.py` identifies exact visual duplicates before combining datasets or splitting by patient, addressing the duplicate-image risk highlighted in transformer dataset research.
 
@@ -46,6 +46,8 @@ Run the centralized comparison with the same manifest and config as the federate
 ```bash
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
 ```
+
+Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
 
 It creates one deterministic, group-aware train/validation/test split over the full manifest and trains a single model on the full centralized training partition; it does not create simulated hospitals. The model, image transforms, loss, optimizer, and validation-based checkpointing use the matching config; FedProx and server aggregation do not apply centrally. Because the federated workflow assigns groups to hospitals before splitting within each hospital, its exact row assignments differ from this global centralized split. Results are saved separately under `runs/centralized/<run_name>/`, including `split_assignments.csv` so the rows can be audited.
 
@@ -89,16 +91,36 @@ python train.py --manifest data/ISIC2019/isic2019_segmented_manifest.csv --confi
 
 Keep the original manifests and baseline run outputs. Each classifier config uses the same fixed seed and split logic, so the original and segmented runs can be compared on the same held-out rows. Before claiming test performance, check for duplicate images between the ISIC 2018 segmenter training images and the HAM10000/ISIC 2019 test images; overlapping images can leak information into the evaluation. Review predicted crops from several images, especially rare or unusually large lesions, before relying on the segmented run.
 
-## Full-image 288 px classifier runs
+## Full-image resolution and MobileNet comparisons
 
-The HAM10000 and ISIC 2019 GPU configs use 288 px inputs. Before training, they create and reuse square, pre-resized JPEG copies in a hidden `.resized_cache_288` folder beside the manifest, reducing repeated full-resolution image decoding. Classifier preprocessing preserves the complete original image and its proportions by scaling to fit a square and padding rather than cropping or stretching. The configs use new run names, so these runs do not replace earlier checkpoints. Use each dataset's original manifest, not the optional `*_segmented_manifest.csv`:
+The default HAM10000 and ISIC 2019 GPU configs use 288 px inputs. The 320 and 384 configs create and reuse square, pre-resized JPEG copies in `.resized_cache_<size>` beside the manifest. Preprocessing preserves the complete image by fitting and padding rather than cropping or stretching. Use the original manifest, not an optional segmented manifest:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
 python train.py --manifest data/ISIC2019/isic2019_manifest.csv --config config/isic2019_gpu.yaml
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_384.yaml
 ```
 
-If GPU memory allows and 288 px improves held-out metrics, change `image_size` to `320` in the relevant config and use a distinct `run_name` for that comparison. Higher resolution can retain more detail, but it does not guarantee better classification scores.
+For ISIC, use the matching `isic2019_320.yaml` and `isic2019_384.yaml`. Higher resolution can retain more detail but needs more GPU memory and does not guarantee better scores.
+
+Recent `timm` releases provide MobileNetV4. Install requirements, then check the installed version and model name:
+
+```bash
+python -c "import timm; print(timm.__version__, 'mobilenetv4_conv_medium' in timm.list_models())"
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_v4_medium_320.yaml
+```
+
+For a 3–5 member ensemble, train separate centralized runs with distinct training seeds and run names while keeping `split_seed: 42`. Example:
+
+```bash
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 101 --run-name ham_320_seed101
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 202 --run-name ham_320_seed202
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 303 --run-name ham_320_seed303
+python -m centralized_baseline.ensemble --manifest data/HAM10000/ham10000_manifest.csv --checkpoint runs/centralized/ham_320_seed101/best_model.pt --checkpoint runs/centralized/ham_320_seed202/best_model.pt --checkpoint runs/centralized/ham_320_seed303/best_model.pt --output runs/ham_320_ensemble
+```
+
+Ensemble members can use different supported model names or image sizes. The evaluator verifies that saved group splits and label order match, applies each run's configured 8-view dihedral TTA, averages logits, fits calibration on validation outputs, and reports test metrics. Compare individual and ensemble results; neither higher resolution nor ensembling guarantees improvement.
 
 ## Classifier runs with segmentation
 

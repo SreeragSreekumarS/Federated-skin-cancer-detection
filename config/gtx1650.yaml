@@ -34,6 +34,7 @@ train_fraction: 0.70
 val_fraction: 0.15
 test_fraction: 0.15
 tta: true
+tta_views: 8
 amp: true
 strong_augmentation: true
 cache_resized_images: true

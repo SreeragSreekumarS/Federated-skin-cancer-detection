@@ -8,7 +8,9 @@ import yaml
 @dataclass
 class TrainConfig:
     seed: int = 42
+    split_seed: int = 42
     run_name: str = "gtx1650_federated_mobilenetv3"
+    model_name: str = "mobilenet_v3_large"
     clients: int = 3
     dirichlet_alpha: float = 1.0
     rounds: int = 30
@@ -45,6 +47,7 @@ class TrainConfig:
     val_fraction: float = 0.15
     test_fraction: float = 0.15
     tta: bool = True
+    tta_views: int = 8
     amp: bool = True
     strong_augmentation: bool = False
     balanced_sampling: bool = False
@@ -53,6 +56,8 @@ class TrainConfig:
     def validate(self) -> None:
         if self.clients < 2 or self.rounds < 1 or self.batch_size < 1:
             raise ValueError("clients must be >= 2; rounds and batch_size must be positive")
+        if self.tta_views not in {1, 2, 4, 8}:
+            raise ValueError("tta_views must be one of 1, 2, 4, or 8")
         if self.dirichlet_alpha <= 0 or not 0 < self.client_fraction <= 1:
             raise ValueError("dirichlet_alpha must be positive and client_fraction must be in (0, 1]")
         if self.classifier_hidden_dim < 1 or not 0 <= self.classifier_dropout < 1:

@@ -22,8 +22,17 @@ def main():
     parser.add_argument("--config", default="config/gtx1650.yaml")
     parser.add_argument("--output", default="runs")
     parser.add_argument("--no-pretrained", action="store_true", help="Do not download/use ImageNet weights (only for offline smoke tests)")
+    parser.add_argument("--seed", type=int, help="Training seed; split_seed remains fixed for repeated-seed ensembles")
+    parser.add_argument("--run-name")
+    parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
+    parser.add_argument("--image-size", type=int)
     args = parser.parse_args()
-    config = load_config(args.config); seed_everything(config.seed)
+    config = load_config(args.config)
+    if args.seed is not None: config.seed = args.seed
+    if args.run_name: config.run_name = args.run_name
+    if args.model_name: config.model_name = args.model_name
+    if args.image_size: config.image_size = args.image_size
+    config.validate(); seed_everything(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
@@ -33,7 +42,7 @@ def main():
         print(f"Preparing resized-image cache at {cache_dir}")
         frame = cache_resized_images(frame, config.image_size, cache_dir)
     client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_federated_splits(
-        frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction, config.seed
+        frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction, config.split_seed
     )
     output = Path(args.output) / config.run_name; output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
@@ -48,7 +57,7 @@ def main():
     weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32)
     model = build_model(len(class_names), pretrained=not args.no_pretrained, use_cbam=config.use_cbam,
                         classifier_hidden_dim=config.classifier_hidden_dim, classifier_dropout=config.classifier_dropout,
-                        drop_path_rate=config.drop_path_rate).to(device)
+                        drop_path_rate=config.drop_path_rate, model_name=config.model_name).to(device)
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
@@ -72,8 +81,11 @@ def main():
         print(f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, balanced accuracy={metrics['balanced_accuracy']:.4f}")
         if metrics["macro_f1"] > best_f1:
             best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
-            torch.save({"model_state": ema.ema.state_dict(), "class_names": class_names, "image_size": config.image_size,
-                        "classifier_hidden_dim": config.classifier_hidden_dim, "classifier_dropout": config.classifier_dropout}, output / "best_model.pt")
+            torch.save({"model_state": ema.ema.state_dict(), "class_names": class_names,
+                        "model_name": config.model_name, "image_size": config.image_size,
+                        "classifier_hidden_dim": config.classifier_hidden_dim,
+                        "classifier_dropout": config.classifier_dropout,
+                        "drop_path_rate": config.drop_path_rate}, output / "best_model.pt")
         else:
             stale += 1
             lr_stale += 1

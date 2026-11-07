@@ -21,4 +21,5 @@ train_fraction: 0.70
 val_fraction: 0.15
 test_fraction: 0.15
 tta: false
+tta_views: 1
 amp: true

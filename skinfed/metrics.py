@@ -7,7 +7,7 @@ from sklearn.metrics import (
 )
 
 
-def classification_metrics(targets: list[int], probabilities: np.ndarray, class_names: list[str]) -> tuple[dict, np.ndarray]:
+def classification_metrics(targets: list[int], probabilities: np.ndarray, class_names: list[str], predicted_labels: np.ndarray | None = None) -> tuple[dict, np.ndarray]:
     y_true = np.asarray(targets)
     probabilities = np.asarray(probabilities, dtype=np.float64)
     if probabilities.ndim != 2 or probabilities.shape != (len(y_true), len(class_names)):
@@ -20,7 +20,9 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
     # Normalize after float32 inference/autocast to satisfy sklearn's strict
     # multiclass probability validation and keep all metrics consistent.
     probabilities = probabilities / row_sums
-    y_pred = probabilities.argmax(axis=1)
+    y_pred = probabilities.argmax(axis=1) if predicted_labels is None else np.asarray(predicted_labels, dtype=int)
+    if y_pred.shape != y_true.shape or (y_pred < 0).any() or (y_pred >= len(class_names)).any():
+        raise ValueError("predicted_labels must contain one valid class index per target")
     labels = np.arange(len(class_names))
     precision, recall, f1, support = precision_recall_fscore_support(y_true, y_pred, labels=labels, zero_division=0)
     matrix = confusion_matrix(y_true, y_pred, labels=labels)

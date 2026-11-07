@@ -13,10 +13,13 @@ import torch
 from skinfed.config import load_config, save_config
 from skinfed.data import _split_indices, cache_resized_images, read_manifest
 from skinfed.federated import (
-    FocalCrossEntropy, ModelEMA, evaluate, make_loader,
+    FocalCrossEntropy, ModelEMA, evaluate, make_loader, predict_logits,
     mixup_cutmix, optimizer_parameter_groups,
 )
+from skinfed.calibration import fit_class_thresholds, fit_temperature, threshold_predictions
+from skinfed.metrics import classification_metrics
 from skinfed.model import build_model
+from skinfed.model import freeze_features
 from skinfed.plots import save_result_plots
 
 
@@ -36,9 +39,18 @@ def main() -> None:
     parser.add_argument("--config", default="config/gtx1650.yaml")
     parser.add_argument("--output", default="runs/centralized")
     parser.add_argument("--no-pretrained", action="store_true")
+    parser.add_argument("--seed", type=int, help="Training seed; split_seed stays fixed for repeated-seed ensembles")
+    parser.add_argument("--run-name")
+    parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
+    parser.add_argument("--image-size", type=int)
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.seed is not None: config.seed = args.seed
+    if args.run_name: config.run_name = args.run_name
+    if args.model_name: config.model_name = args.model_name
+    if args.image_size: config.image_size = args.image_size
+    config.validate()
     seed_everything(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
@@ -52,7 +64,7 @@ def main() -> None:
         print(f"Preparing resized-image cache at {cache_dir}")
         frame = cache_resized_images(frame, config.image_size, cache_dir)
     train_indices, val_indices, test_indices = _split_indices(
-        frame, config.train_fraction, config.val_fraction, config.seed
+        frame, config.train_fraction, config.val_fraction, config.split_seed
     )
     output = Path(args.output) / config.run_name
     output.mkdir(parents=True, exist_ok=True)
@@ -101,10 +113,10 @@ def main() -> None:
         classifier_hidden_dim=config.classifier_hidden_dim,
         classifier_dropout=config.classifier_dropout,
         drop_path_rate=config.drop_path_rate,
+        model_name=config.model_name,
     ).to(device)
     ema = ModelEMA(model, config.ema_decay)
-    for parameter in model.features.parameters():
-        parameter.requires_grad = config.freeze_backbone_rounds == 0
+    freeze_features(model, frozen=config.freeze_backbone_rounds > 0)
     scaler = torch.amp.GradScaler(
         device.type, enabled=config.amp and device.type == "cuda"
     )
@@ -116,8 +128,7 @@ def main() -> None:
     # training partition. Validation and early stopping remain round-based.
     for round_number in range(1, config.rounds + 1):
         frozen = round_number <= config.freeze_backbone_rounds
-        for parameter in model.features.parameters():
-            parameter.requires_grad = not frozen
+        freeze_features(model, frozen=frozen)
         optimizer = torch.optim.AdamW(
             optimizer_parameter_groups(model, config, current_lr),
             weight_decay=config.weight_decay,
@@ -169,9 +180,11 @@ def main() -> None:
             torch.save({
                 "model_state": ema.ema.state_dict(),
                 "class_names": class_names,
+                "model_name": config.model_name,
                 "image_size": config.image_size,
                 "classifier_hidden_dim": config.classifier_hidden_dim,
                 "classifier_dropout": config.classifier_dropout,
+                "drop_path_rate": config.drop_path_rate,
             }, output / "best_model.pt")
         else:
             stale += 1
@@ -187,12 +200,16 @@ def main() -> None:
 
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     ema.ema.load_state_dict(checkpoint["model_state"])
-    test_metrics, matrix, targets, probabilities = evaluate(
-        ema.ema, frame, test_indices, config, device, class_names,
-        return_probabilities=True,
-    )
+    validation_logits, validation_targets = predict_logits(ema.ema, frame, val_indices, config, device)
+    temperature = fit_temperature(validation_logits, validation_targets)
+    validation_probabilities = torch.softmax(torch.from_numpy(validation_logits) / temperature, dim=1).numpy()
+    thresholds = fit_class_thresholds(validation_probabilities, validation_targets, class_names)
+    test_logits, targets = predict_logits(ema.ema, frame, test_indices, config, device)
+    probabilities = torch.softmax(torch.from_numpy(test_logits) / temperature, dim=1).numpy()
+    predictions = threshold_predictions(probabilities, thresholds, class_names)
+    test_metrics, matrix = classification_metrics(targets, probabilities, class_names, predictions)
     (output / "metrics.json").write_text(
-        json.dumps({"validation_history": history, "test": test_metrics}, indent=2),
+        json.dumps({"validation_history": history, "calibration": {"temperature": temperature, "class_thresholds": thresholds}, "test": test_metrics}, indent=2),
         encoding="utf-8",
     )
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(
@@ -202,6 +219,7 @@ def main() -> None:
         "class_names": np.asarray(class_names),
         "targets": targets,
         "probabilities": probabilities,
+        "predicted_labels": predictions,
     }
     np.savez_compressed(output / "test_predictions.npz", **predictions)
     save_result_plots(
