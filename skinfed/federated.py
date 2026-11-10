@@ -217,6 +217,11 @@ def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, n
         images = images.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
             logits = torch.stack([model(view) for view in dihedral_views(images, view_count)]).mean(dim=0)
+        if not torch.isfinite(logits).all():
+            raise FloatingPointError(
+                "Model inference produced non-finite logits before probability calculation. "
+                "Check for numerical instability; try disabling AMP and lowering the learning rate."
+            )
         logits_all.append(logits.float().cpu().numpy())
         targets.extend(labels.numpy().tolist())
     return np.concatenate(logits_all), np.asarray(targets, dtype=int)

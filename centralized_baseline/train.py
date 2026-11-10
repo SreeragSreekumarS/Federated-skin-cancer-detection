@@ -42,6 +42,7 @@ def main() -> None:
     parser.add_argument("--output", default="runs/centralized")
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--no-cbam", action="store_true", help="Disable the MobileNetV3 CBAM attention block")
+    parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision if training becomes numerically unstable")
     parser.add_argument("--seed", type=int, help="Training seed; split_seed stays fixed for repeated-seed ensembles")
     parser.add_argument("--run-name")
     parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
@@ -54,6 +55,7 @@ def main() -> None:
     if args.model_name: config.model_name = args.model_name
     if args.image_size: config.image_size = args.image_size
     if args.no_cbam: config.use_cbam = False
+    if args.no_amp: config.amp = False
     config.validate()
     seed_everything(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -164,10 +166,18 @@ def main() -> None:
                     enabled=config.amp and device.type == "cuda",
                 ):
                     logits = model(images)
+                    if not torch.isfinite(logits).all():
+                        raise FloatingPointError(
+                            "Training produced non-finite logits. Retry with --no-amp and a lower learning rate."
+                        )
                     loss = criterion(logits, targets_a)
                     if targets_b is not None:
                         loss = mix_lambda * loss + (1 - mix_lambda) * criterion(logits, targets_b)
                     loss = loss / config.gradient_accumulation
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "Training produced a non-finite loss. Retry with --no-amp and a lower learning rate."
+                    )
                 batch_size = targets.size(0)
                 train_loss_sum += float(loss.detach()) * config.gradient_accumulation * batch_size
                 batch_predictions = logits.detach().argmax(dim=1)

@@ -49,6 +49,8 @@ python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.
 
 Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
 
+If training reports non-finite logits or loss, retry with `--no-amp`; if it persists, lower `learning_rate` and `backbone_learning_rate` in a separate config. Use a new run name for the retry. A failed run has not produced final held-out test metrics.
+
 To compare centralized MobileNetV3 with and without CBAM on the same data split, use a distinct run name:
 
 ```bash
