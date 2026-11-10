@@ -9,8 +9,12 @@ import yaml
 class TrainConfig:
     seed: int = 42
     split_seed: int = 42
+    partition_mode: str = "global"
     run_name: str = "gtx1650_federated_mobilenetv3"
     model_name: str = "mobilenet_v3_large"
+    use_metadata: bool = False
+    decision_metric: str = "accuracy"
+    preserve_melanoma_sensitivity: bool = True
     clients: int = 3
     dirichlet_alpha: float = 1.0
     rounds: int = 30
@@ -58,6 +62,10 @@ class TrainConfig:
             raise ValueError("clients must be >= 2; rounds and batch_size must be positive")
         if self.tta_views not in {1, 2, 4, 8}:
             raise ValueError("tta_views must be one of 1, 2, 4, or 8")
+        if self.decision_metric not in {"accuracy", "balanced_accuracy", "macro_f1"}:
+            raise ValueError("decision_metric must be accuracy, balanced_accuracy, or macro_f1")
+        if self.partition_mode not in {"global", "hospital_first"}:
+            raise ValueError("partition_mode must be global or hospital_first")
         if self.dirichlet_alpha <= 0 or not 0 < self.client_fraction <= 1:
             raise ValueError("dirichlet_alpha must be positive and client_fraction must be in (0, 1]")
         if self.classifier_hidden_dim < 1 or not 0 <= self.classifier_dropout < 1:

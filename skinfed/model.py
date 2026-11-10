@@ -34,7 +34,7 @@ class CBAM(nn.Module):
 
 
 class AttentionMobileNetV3(nn.Module):
-    def __init__(self, base: nn.Module, num_classes: int, use_cbam: bool, classifier_hidden_dim: int, classifier_dropout: float) -> None:
+    def __init__(self, base: nn.Module, num_classes: int, use_cbam: bool, classifier_hidden_dim: int, classifier_dropout: float, metadata_dim: int = 0) -> None:
         super().__init__()
         self.features = base.features
         self.attention = CBAM(960) if use_cbam else nn.Identity()
@@ -45,24 +45,38 @@ class AttentionMobileNetV3(nn.Module):
         # ImageNet classifier later expands these to 1280 channels, so using the
         # last classifier layer's input size here would not match `features`.
         feature_dim = base.classifier[0].in_features
+        self.metadata_dim = metadata_dim
+        self.metadata_encoder = (
+            nn.Sequential(nn.Linear(metadata_dim, 64), nn.LayerNorm(64), nn.Hardswish())
+            if metadata_dim else None
+        )
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim, classifier_hidden_dim),
+            nn.Linear(feature_dim + (64 if metadata_dim else 0), classifier_hidden_dim),
             # LayerNorm remains valid for a final short client batch, unlike
             # BatchNorm1d which can fail when a simulated hospital has one sample.
             nn.LayerNorm(classifier_hidden_dim), nn.Hardswish(), nn.Dropout(classifier_dropout),
             nn.Linear(classifier_hidden_dim, num_classes),
         )
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, metadata: torch.Tensor | None = None) -> torch.Tensor:
         features = self.attention(self.features(images))
-        return self.classifier(torch.flatten(self.avgpool(features), 1))
+        features = torch.flatten(self.avgpool(features), 1)
+        if self.metadata_encoder is not None:
+            if metadata is None:
+                raise ValueError("This model requires age/sex/site metadata inputs")
+            features = torch.cat((features, self.metadata_encoder(metadata)), dim=1)
+        elif metadata is not None:
+            raise ValueError("Metadata was supplied to a model configured without metadata")
+        return self.classifier(features)
 
 
 def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True,
                 classifier_hidden_dim: int = 256, classifier_dropout: float = 0.30,
                 drop_path_rate: float = 0.10,
-                model_name: str = "mobilenet_v3_large") -> nn.Module:
+                model_name: str = "mobilenet_v3_large", metadata_dim: int = 0) -> nn.Module:
     if model_name != "mobilenet_v3_large":
+        if metadata_dim:
+            raise ValueError("Age/sex/site fusion is currently implemented for the MobileNetV3 classifier")
         try:
             import timm
         except ImportError as error:
@@ -99,7 +113,7 @@ def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True
             module.add_module("drop_path", StochasticDepth(probability, mode="row"))
             module.forward = MethodType(_stochastic_residual_forward, module)
     return AttentionMobileNetV3(
-        base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout
+        base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout, metadata_dim
     )
 
 

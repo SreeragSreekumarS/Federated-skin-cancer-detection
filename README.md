@@ -20,13 +20,13 @@ This is a research tool, not a medical device. Do not use its output to diagnose
 
 1. Create and activate a Python 3.10+ environment.
 2. Install the CUDA build of PyTorch suitable for your NVIDIA driver from [pytorch.org](https://pytorch.org/get-started/locally/), then run `pip install -r requirements.txt`.
-3. Prepare a CSV manifest with `image_path,label,patient_id` columns. Paths may be absolute or relative to the manifest. A true patient identifier is preferred; a lesion identifier groups images of the same lesion but does not guarantee that separate lesions from one patient stay together.
-4. For HAM10000, use the helper below. For ISIC 2019, include its metadata file so available `lesion_id` values are used, then audit the manifest:
+3. Prepare a CSV manifest with `image_path,label,patient_id` columns. Metadata-enabled profiles also require canonical `age,sex,site` columns. Paths may be absolute or relative to the manifest. A true patient identifier is preferred; a lesion identifier groups images of the same lesion but does not guarantee that separate lesions from one patient stay together.
+4. For HAM10000 and ISIC 2019, include metadata so lesion IDs and the approved age/sex/site fields are retained, then audit the manifest:
 
 ```powershell
-python tools/prepare_ham10000.py --metadata C:\data\HAM10000_metadata.csv --images C:\data\HAM10000_images --output data\ham10000_manifest.csv
+python tools/prepare_ham10000.py --metadata C:\data\HAM10000_metadata.csv --images C:\data\HAM10000_images --output data\ham10000_metadata_manifest.csv
 python tools/audit_manifest.py --manifest data\ham10000_manifest.csv --output runs\ham10000_duplicate_audit.csv
-python tools/prepare_isic2019.py --ground-truth data\ISIC2019\ISIC_2019_Training_GroundTruth.csv --images data\ISIC2019\images\ISIC_2019_Training_Input --metadata data\ISIC2019\ISIC_2019_Training_Metadata.csv --output data\ISIC2019\isic2019_manifest.csv
+python tools/prepare_isic2019.py --ground-truth data\ISIC2019\ISIC_2019_Training_GroundTruth.csv --images data\ISIC2019\images\ISIC_2019_Training_Input --metadata data\ISIC2019\ISIC_2019_Training_Metadata.csv --output data\ISIC2019\isic2019_metadata_manifest.csv
 python tools/audit_manifest.py --manifest data\ISIC2019\isic2019_manifest.csv --output runs\isic2019_duplicate_audit.csv
 python train.py --manifest data\ham10000_manifest.csv --config config\gtx1650.yaml
 ```
@@ -47,7 +47,7 @@ Run the centralized comparison with the same manifest and config as the federate
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
 ```
 
-Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
+Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. Final paired profiles keep `split_seed: 42` while varying the training seed. Validation selects among raw argmax, smoothed per-class thresholds, and prior logit adjustment using accuracy; thresholds or adjustment are used only when they improve validation accuracy, and both are disallowed if melanoma sensitivity falls below raw argmax. Test reports always include raw argmax and selected-rule metrics.
 
 If training reports non-finite logits or loss, retry with `--no-amp`; if it persists, lower `learning_rate` and `backbone_learning_rate` in a separate config. Use a new run name for the retry. A failed run has not produced final held-out test metrics.
 
@@ -59,7 +59,7 @@ python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.
 
 The saved `config.yaml` records `use_cbam: false`; results are written to `runs/centralized/ham10000_mobilenetv3_no_cbam/`. Compare against the CBAM run using the same manifest, config, and split seed.
 
-It creates one deterministic, group-aware train/validation/test split over the full manifest and trains a single model on the full centralized training partition; it does not create simulated hospitals. The model, image transforms, loss, optimizer, and validation-based checkpointing use the matching config; FedProx and server aggregation do not apply centrally. Because the federated workflow assigns groups to hospitals before splitting within each hospital, its exact row assignments differ from this global centralized split. Results are saved separately under `runs/centralized/<run_name>/`, including `split_assignments.csv` so the rows can be audited.
+It trains one model over the full centralized training partition; FedProx and server aggregation do not apply centrally. The final paired profiles set `partition_mode: hospital_first`: patient/lesion groups are assigned to simulated hospitals, then each hospital is split, and the centralized runner merges those hospital partitions for training. This makes its train/validation/test rows identical to the matching federated run while still training centrally. `split_assignments.csv` records hospital and split for auditing.
 
 Every metric report includes accuracy, balanced accuracy, micro/macro/weighted precision-recall-F1, one-vs-rest ROC-AUC, average precision, top-2 accuracy, Cohen's kappa, Matthews correlation coefficient, and log loss. For every class it includes precision (PPV), sensitivity/recall, specificity, negative predictive value, F1, ROC-AUC, average precision, false-positive/false-negative rates, TP/TN/FP/FN counts, and support. Confusion matrices are saved separately.
 
@@ -121,16 +121,41 @@ python -c "import timm; print(timm.__version__, 'mobilenetv4_conv_medium' in tim
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_v4_medium_320.yaml
 ```
 
-For a 3–5 member ensemble, train separate centralized runs with distinct training seeds and run names while keeping `split_seed: 42`. Example:
+For the HAM10000 MobileNetV3 ensemble, train three V3-320 centralized runs with distinct training seeds while keeping the same partition:
 
 ```bash
-python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 101 --run-name ham_320_seed101
-python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 202 --run-name ham_320_seed202
-python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_320.yaml --seed 303 --run-name ham_320_seed303
-python -m centralized_baseline.ensemble --manifest data/HAM10000/ham10000_manifest.csv --checkpoint runs/centralized/ham_320_seed101/best_model.pt --checkpoint runs/centralized/ham_320_seed202/best_model.pt --checkpoint runs/centralized/ham_320_seed303/best_model.pt --output runs/ham_320_ensemble
+python tools/run_seed_sweep.py --mode centralized --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seeds 42 123 2026
+python -m centralized_baseline.ensemble --manifest data/HAM10000/ham10000_metadata_manifest.csv --checkpoint runs/centralized/ham10000_v3_320_no_cbam_seed42/best_model.pt --checkpoint runs/centralized/ham10000_v3_320_no_cbam_seed123/best_model.pt --checkpoint runs/centralized/ham10000_v3_320_no_cbam_seed2026/best_model.pt --output runs/ham10000_v3_320_ensemble
+python tools/summarize_seed_runs.py --run runs/centralized/ham10000_v3_320_no_cbam_seed42 --run runs/centralized/ham10000_v3_320_no_cbam_seed123 --run runs/centralized/ham10000_v3_320_no_cbam_seed2026 --output runs/ham10000_v3_seed_summary.csv
 ```
 
-Ensemble members can use different supported model names or image sizes. The evaluator verifies that saved group splits and label order match, applies each run's configured 8-view dihedral TTA, averages logits, fits calibration on validation outputs, and reports test metrics. Compare individual and ensemble results; neither higher resolution nor ensembling guarantees improvement.
+The ensemble accepts MobileNetV3 320px checkpoints, verifies that saved group splits and label order match, applies each member's configured 8-view TTA, averages logits, selects its decision rule on validation predictions, and reports raw and selected test metrics. Mean ± sample standard deviation across independent training seeds is written by the summary tool.
+
+## Final metadata-enabled V3 profiles and federated comparison
+
+Rebuild the metadata manifests with the commands in Setup. HAM10000 uses `age`, `sex`, and `localization`; ISIC 2019 uses `age_approx`, `sex`, and `anatom_site_general`. Missing values map to explicit unknown encodings. Age is scaled by 100 with a missing-value indicator. Only these three fields enter the model; the preparers omit `dx_type`.
+
+The V3 classifier projects the metadata through a small MLP and concatenates it with pooled image features before the classifier. The same metadata pipeline is used in centralized and federated training. Run every profile at the same seeds for a direct comparison; `split_seed: 42` is fixed independently of training seeds. Mean ± standard deviation here describes variation across training seeds on the same held-out partition, not uncertainty from different test splits:
+
+```bash
+# Centralized seed runs, using the hospital-first partition merged into one training set
+python tools/run_seed_sweep.py --mode centralized --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode centralized --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode centralized --manifest data/ISIC2019/isic2019_metadata_manifest.csv --config config/isic2019_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode centralized --manifest data/ISIC2019/isic2019_metadata_manifest.csv --config config/isic2019_v3_320_cbam.yaml --seeds 42 123 2026
+
+# Federated runs on the exact same partitions
+python tools/run_seed_sweep.py --mode federated --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode federated --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode federated --manifest data/ISIC2019/isic2019_metadata_manifest.csv --config config/isic2019_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode federated --manifest data/ISIC2019/isic2019_metadata_manifest.csv --config config/isic2019_v3_320_cbam.yaml --seeds 42 123 2026
+```
+
+If the ISIC V4 reference run used `--no-amp`, add `--no-amp` to the corresponding sweeps for an apples-to-apples optimization recipe. Summarize a seed group with repeated `--run` arguments, for example:
+
+```bash
+python tools/summarize_seed_runs.py --run runs/ham10000_v3_320_no_cbam_seed42 --run runs/ham10000_v3_320_no_cbam_seed123 --run runs/ham10000_v3_320_no_cbam_seed2026 --output runs/ham10000_federated_v3_seed_summary.csv
+```
 
 ## Classifier runs with segmentation
 

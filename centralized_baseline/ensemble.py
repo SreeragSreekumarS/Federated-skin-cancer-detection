@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from skinfed.calibration import fit_class_thresholds, fit_temperature, threshold_predictions
+from skinfed.calibration import apply_decision_rule, select_decision_rule
 from skinfed.config import load_config
-from skinfed.data import cache_resized_images, read_manifest
+from skinfed.data import METADATA_FEATURE_DIM, cache_resized_images, read_manifest
 from skinfed.federated import predict_logits
 from skinfed.metrics import classification_metrics
 from skinfed.model import build_model
@@ -34,14 +34,24 @@ def main() -> None:
     for checkpoint_path in args.checkpoint:
         run_dir = Path(checkpoint_path).resolve().parent
         config = load_config(run_dir / "config.yaml")
+        if config.model_name != "mobilenet_v3_large" or config.image_size != 320:
+            raise ValueError("This ensemble is reserved for matching MobileNetV3 320px checkpoints")
+        if configs and (
+            config.use_metadata != configs[0].use_metadata
+            or config.partition_mode != configs[0].partition_mode
+            or config.decision_metric != configs[0].decision_metric
+        ):
+            raise ValueError("Ensemble members must use the same metadata, partition mode, and selection metric")
         if config.cache_resized_images:
             cache = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
             run_frame = cache_resized_images(frame.copy(), config.image_size, cache)
         else:
             run_frame = frame
-        assignments = pd.read_csv(run_dir / "split_assignments.csv").sort_values("manifest_index")[
-            ["manifest_index", "split", "label", "patient_id"]
-        ].reset_index(drop=True)
+        assignment_columns = ["manifest_index", "image_path", "split", "label", "patient_id"]
+        saved_assignments = pd.read_csv(run_dir / "split_assignments.csv")
+        if "hospital_id" in saved_assignments.columns:
+            assignment_columns.append("hospital_id")
+        assignments = saved_assignments.sort_values("manifest_index")[assignment_columns].reset_index(drop=True)
         if reference_assignments is None:
             reference_assignments = assignments
             split_data = {name: assignments.loc[assignments.split == name, "manifest_index"].to_numpy(dtype=int)
@@ -56,6 +66,7 @@ def main() -> None:
             classifier_hidden_dim=config.classifier_hidden_dim,
             classifier_dropout=config.classifier_dropout,
             drop_path_rate=config.drop_path_rate, model_name=checkpoint.get("model_name", config.model_name),
+            metadata_dim=checkpoint.get("metadata_dim", METADATA_FEATURE_DIM if config.use_metadata else 0),
         ).to(device)
         model.load_state_dict(checkpoint["model_state"])
         model.eval()
@@ -75,19 +86,30 @@ def main() -> None:
 
     mean_val_logits = np.mean(val_logits, axis=0)
     mean_test_logits = np.mean(test_logits, axis=0)
-    temperature = fit_temperature(mean_val_logits, val_targets)
-    val_probs = torch.softmax(torch.from_numpy(mean_val_logits) / temperature, dim=1).numpy()
-    thresholds = fit_class_thresholds(val_probs, val_targets, class_names)
-    probabilities = torch.softmax(torch.from_numpy(mean_test_logits) / temperature, dim=1).numpy()
-    predicted_labels = threshold_predictions(probabilities, thresholds, class_names)
+    train_rows = reference_assignments[reference_assignments.split == "train"]
+    target_map = {name: index for index, name in enumerate(class_names)}
+    train_counts = train_rows.label.astype(str).map(target_map).value_counts().reindex(
+        range(len(class_names)), fill_value=0
+    ).to_numpy()
+    decision = select_decision_rule(
+        mean_val_logits, val_targets, class_names, train_counts,
+        metric=configs[0].decision_metric,
+        preserve_melanoma_sensitivity=configs[0].preserve_melanoma_sensitivity,
+    )
+    raw_probabilities = torch.softmax(torch.from_numpy(mean_test_logits), dim=1).numpy()
+    raw_predictions = mean_test_logits.argmax(axis=1)
+    raw_metrics, raw_matrix = classification_metrics(test_targets, raw_probabilities, class_names, raw_predictions)
+    probabilities, predicted_labels = apply_decision_rule(mean_test_logits, decision, class_names)
     metrics, matrix = classification_metrics(test_targets, probabilities, class_names, predicted_labels)
 
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    (output / "calibration.json").write_text(json.dumps({"temperature": temperature, "class_thresholds": thresholds}, indent=2), encoding="utf-8")
-    (output / "metrics.json").write_text(json.dumps({"members": [str(Path(p).resolve()) for p in args.checkpoint], "tta_views": [c.tta_views if c.tta else 1 for c in configs], "calibration": {"temperature": temperature, "class_thresholds": thresholds}, "test": metrics}, indent=2), encoding="utf-8")
+    (output / "decision_selection.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
+    (output / "metrics.json").write_text(json.dumps({"members": [str(Path(p).resolve()) for p in args.checkpoint], "tta_views": [c.tta_views if c.tta else 1 for c in configs], "decision_selection": decision, "raw_argmax": raw_metrics, "selected": metrics, "test": metrics}, indent=2), encoding="utf-8")
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
+    pd.DataFrame(raw_matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix_raw_argmax.csv")
     np.savez_compressed(output / "test_predictions.npz", class_names=np.asarray(class_names), targets=test_targets,
+                        raw_probabilities=raw_probabilities, raw_predictions=raw_predictions,
                         probabilities=probabilities, predicted_labels=predicted_labels)
     print(f"Ensemble results saved to: {output}")
     print(json.dumps(metrics, indent=2))

@@ -1,7 +1,11 @@
 seed: 42
 split_seed: 42
-run_name: isic2019_full_320_mobilenetv3_no_cbam
+partition_mode: hospital_first
+run_name: isic2019_v3_320_metadata_no_cbam
 model_name: mobilenet_v3_large
+use_metadata: true
+decision_metric: accuracy
+preserve_melanoma_sensitivity: true
 clients: 3
 dirichlet_alpha: 1.0
 rounds: 30

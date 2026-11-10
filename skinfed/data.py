@@ -17,6 +17,47 @@ from torchvision import transforms
 
 
 REQUIRED_COLUMNS = {"image_path", "label"}
+SEX_VALUES = ("female", "male", "unknown")
+SITE_VALUES = (
+    "abdomen", "acral", "back", "chest", "ear", "face", "foot", "genital",
+    "hand", "head_neck", "lower_extremity", "neck", "oral_genital",
+    "palms_soles", "scalp", "torso", "trunk", "upper_extremity", "unknown",
+)
+METADATA_FEATURE_DIM = 2 + len(SEX_VALUES) + len(SITE_VALUES)
+
+
+def encode_metadata(frame: pd.DataFrame) -> np.ndarray:
+    """Encode only age, sex, and anatomical site with fixed vocabularies."""
+    missing = {"age", "sex", "site"} - set(frame.columns)
+    if missing:
+        raise ValueError(
+            f"Metadata training requires manifest columns {sorted(missing)}; "
+            "rebuild the manifest with the dataset metadata option."
+        )
+    age = pd.to_numeric(frame["age"], errors="coerce").to_numpy(dtype=np.float32)
+    age_missing = ~np.isfinite(age)
+    age = np.clip(np.where(age_missing, 0.0, age) / 100.0, 0.0, 1.0)
+    features = [age[:, None], age_missing.astype(np.float32)[:, None]]
+
+    def normalize(value) -> str:
+        if pd.isna(value) or not str(value).strip():
+            return "unknown"
+        return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+    sex = np.asarray([normalize(value) for value in frame["sex"]])
+    sex = np.where(np.isin(sex, SEX_VALUES), sex, "unknown")
+    features.append(np.stack([sex == name for name in SEX_VALUES], axis=1).astype(np.float32))
+
+    site = np.asarray([normalize(value) for value in frame["site"]])
+    aliases = {
+        "head/neck": "head_neck", "oral/genital": "oral_genital",
+        "palms/soles": "palms_soles", "lower_extremity": "lower_extremity",
+        "upper_extremity": "upper_extremity",
+    }
+    site = np.asarray([aliases.get(value, value) for value in site])
+    site = np.where(np.isin(site, SITE_VALUES), site, "unknown")
+    features.append(np.stack([site == name for name in SITE_VALUES], axis=1).astype(np.float32))
+    return np.concatenate(features, axis=1)
 
 
 def read_manifest(path: str | Path) -> tuple[pd.DataFrame, list[str]]:
@@ -143,6 +184,18 @@ def make_federated_splits(frame: pd.DataFrame, clients: int, alpha: float, train
         client_train.append(indices[local_train])
         client_val.append(indices[local_val])
         client_test.append(indices[local_test])
+    assigned_rows = np.concatenate([
+        part for parts in zip(client_train, client_val, client_test) for part in parts
+    ])
+    if len(assigned_rows) != len(frame) or len(np.unique(assigned_rows)) != len(frame):
+        raise RuntimeError("Hospital-first partition did not assign each manifest row exactly once")
+    group_membership: dict[str, tuple[int, str]] = {}
+    for hospital, parts in enumerate(zip(client_train, client_val, client_test)):
+        for split_name, indices in zip(("train", "validation", "test"), parts):
+            for group in frame.iloc[indices].patient_id.astype(str).unique():
+                previous = group_membership.setdefault(group, (hospital, split_name))
+                if previous != (hospital, split_name):
+                    raise RuntimeError(f"Patient/lesion group {group!r} crosses a hospital or split boundary")
     val_indices = np.concatenate(client_val)
     test_indices = np.concatenate(client_test)
     return client_train, client_val, client_test, val_indices, test_indices
@@ -233,12 +286,16 @@ def transforms_for(
 
 
 class LesionDataset(Dataset):
-    def __init__(self, frame: pd.DataFrame, indices: np.ndarray, transform):
+    def __init__(self, frame: pd.DataFrame, indices: np.ndarray, transform, use_metadata: bool = False):
         self.frame, self.indices, self.transform = frame, indices, transform
+        self.metadata = encode_metadata(frame) if use_metadata else None
 
     def __len__(self): return len(self.indices)
 
     def __getitem__(self, item):
         row = self.frame.iloc[int(self.indices[item])]
         with Image.open(row.image_path) as image:
-            return self.transform(image.convert("RGB")), int(row.target)
+            image_tensor = self.transform(image.convert("RGB"))
+        if self.metadata is not None:
+            return image_tensor, torch.from_numpy(self.metadata[int(self.indices[item])]), int(row.target)
+        return image_tensor, int(row.target)

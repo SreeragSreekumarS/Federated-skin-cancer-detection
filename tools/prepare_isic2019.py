@@ -49,19 +49,38 @@ def main() -> None:
         metadata = pd.read_csv(args.metadata)
         if "image" not in metadata.columns:
             raise ValueError("Metadata CSV must contain an 'image' column")
+        column_aliases = {
+            "age": "age_approx" if "age_approx" in metadata.columns else "age",
+            "sex": "sex",
+            "site": "anatom_site_general" if "anatom_site_general" in metadata.columns else "site",
+        }
+        missing_fields = [source for source in column_aliases.values() if source not in metadata.columns]
+        if missing_fields:
+            raise ValueError(f"Metadata CSV is missing required fields: {missing_fields}")
         metadata["image"] = metadata["image"].astype(str)
+        selected = ["image", *column_aliases.values()]
         if "lesion_id" in metadata.columns:
-            metadata = metadata[["image", "lesion_id"]].drop_duplicates("image")
-            labels = labels.merge(metadata, on="image", how="left", validate="one_to_one")
+            selected.append("lesion_id")
+        metadata = metadata[selected].drop_duplicates("image").rename(
+            columns={source: canonical for canonical, source in column_aliases.items()}
+        )
+        labels = labels.merge(metadata, on="image", how="left", validate="one_to_one")
+        if "lesion_id" in labels:
             labels["patient_id"] = labels["lesion_id"].fillna(labels["image"]).astype(str)
         else:
             labels["patient_id"] = labels["image"]
     else:
         labels["patient_id"] = labels["image"]
 
+    # Keep only approved metadata fields; diagnosis methodology is never used.
+    age_values = labels["age"] if "age" in labels else pd.Series(float("nan"), index=labels.index)
+    labels["age"] = pd.to_numeric(age_values, errors="coerce")
+    labels["sex"] = labels.get("sex", pd.Series("unknown", index=labels.index)).fillna("unknown")
+    labels["site"] = labels.get("site", pd.Series("unknown", index=labels.index)).fillna("unknown")
+
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    labels[["image_path", "label", "patient_id"]].to_csv(output, index=False)
+    labels[["image_path", "label", "patient_id", "age", "sex", "site"]].to_csv(output, index=False)
     print(f"Wrote {len(labels)} rows across {labels['label'].nunique()} classes to {output}")
 
 

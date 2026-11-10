@@ -5,8 +5,10 @@ import numpy as np
 import pandas as pd
 import torch
 from skinfed.config import load_config, save_config
-from skinfed.data import cache_resized_images, make_federated_splits, read_manifest
-from skinfed.federated import ModelEMA, aggregate, evaluate, train_client
+from skinfed.data import METADATA_FEATURE_DIM, cache_resized_images, encode_metadata, make_federated_splits, read_manifest
+from skinfed.federated import ModelEMA, aggregate, evaluate, predict_logits, train_client
+from skinfed.calibration import apply_decision_rule, select_decision_rule
+from skinfed.metrics import classification_metrics
 from skinfed.model import build_model
 from skinfed.plots import save_result_plots
 
@@ -22,6 +24,7 @@ def main():
     parser.add_argument("--config", default="config/gtx1650.yaml")
     parser.add_argument("--output", default="runs")
     parser.add_argument("--no-pretrained", action="store_true", help="Do not download/use ImageNet weights (only for offline smoke tests)")
+    parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision for numerical stability")
     parser.add_argument("--seed", type=int, help="Training seed; split_seed remains fixed for repeated-seed ensembles")
     parser.add_argument("--run-name")
     parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
@@ -32,11 +35,15 @@ def main():
     if args.run_name: config.run_name = args.run_name
     if args.model_name: config.model_name = args.model_name
     if args.image_size: config.image_size = args.image_size
+    if args.no_amp: config.amp = False
     config.validate(); seed_everything(config.seed)
+    config.partition_mode = "hospital_first"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
     frame, class_names = read_manifest(args.manifest)
+    if config.use_metadata:
+        encode_metadata(frame)
     if config.cache_resized_images:
         cache_dir = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
         print(f"Preparing resized-image cache at {cache_dir}")
@@ -47,6 +54,24 @@ def main():
     output = Path(args.output) / config.run_name; output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
     (output / "class_names.json").write_text(json.dumps(class_names, indent=2), encoding="utf-8")
+    assignments = []
+    for hospital, (train_part, val_part, test_part) in enumerate(
+        zip(client_indices, client_val_indices, client_test_indices), 1
+    ):
+        for split_name, split_indices in (("train", train_part), ("validation", val_part), ("test", test_part)):
+            for index in split_indices:
+                row = frame.iloc[int(index)]
+                assignments.append({
+                    "manifest_index": int(index),
+                    "image_path": getattr(row, "source_image_path", row.image_path),
+                    "label": row.label,
+                    "patient_id": row.patient_id,
+                    "hospital_id": hospital,
+                    "split": split_name,
+                })
+    pd.DataFrame(assignments).sort_values("manifest_index").to_csv(
+        output / "split_assignments.csv", index=False
+    )
     distributions = {}
     for split_name, split_indices in (("train", client_indices), ("validation", client_val_indices), ("test", client_test_indices)):
         distributions[split_name] = pd.DataFrame(
@@ -57,7 +82,8 @@ def main():
     weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32)
     model = build_model(len(class_names), pretrained=not args.no_pretrained, use_cbam=config.use_cbam,
                         classifier_hidden_dim=config.classifier_hidden_dim, classifier_dropout=config.classifier_dropout,
-                        drop_path_rate=config.drop_path_rate, model_name=config.model_name).to(device)
+                        drop_path_rate=config.drop_path_rate, model_name=config.model_name,
+                        metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0).to(device)
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
@@ -85,7 +111,8 @@ def main():
                         "model_name": config.model_name, "image_size": config.image_size,
                         "classifier_hidden_dim": config.classifier_hidden_dim,
                         "classifier_dropout": config.classifier_dropout,
-                        "drop_path_rate": config.drop_path_rate}, output / "best_model.pt")
+                        "drop_path_rate": config.drop_path_rate,
+                        "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0}, output / "best_model.pt")
         else:
             stale += 1
             lr_stale += 1
@@ -99,37 +126,82 @@ def main():
                 print("Early stopping: validation macro-F1 did not improve."); break
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     ema.ema.load_state_dict(checkpoint["model_state"])
-    test_metrics, matrix, test_targets, test_probabilities = evaluate(
-        ema.ema, frame, test_indices, config, device, class_names, return_probabilities=True
+    validation_logits, validation_targets = predict_logits(ema.ema, frame, val_indices, config, device)
+    train_counts = frame.iloc[np.concatenate(client_indices)].target.value_counts().reindex(
+        range(len(class_names)), fill_value=0
+    ).to_numpy()
+    decision = select_decision_rule(
+        validation_logits, validation_targets, class_names, train_counts,
+        metric=config.decision_metric,
+        preserve_melanoma_sensitivity=config.preserve_melanoma_sensitivity,
     )
-    (output / "metrics.json").write_text(json.dumps({"validation_history": history, "test": test_metrics}, indent=2), encoding="utf-8")
+    test_logits, test_targets = predict_logits(ema.ema, frame, test_indices, config, device)
+    raw_test_probabilities = torch.softmax(torch.from_numpy(test_logits), dim=1).numpy()
+    raw_test_predictions = test_logits.argmax(axis=1)
+    raw_test_metrics, raw_matrix = classification_metrics(
+        test_targets, raw_test_probabilities, class_names, raw_test_predictions
+    )
+    test_probabilities, selected_test_predictions = apply_decision_rule(test_logits, decision, class_names)
+    test_metrics, matrix = classification_metrics(
+        test_targets, test_probabilities, class_names, selected_test_predictions
+    )
+    (output / "metrics.json").write_text(json.dumps({
+        "validation_history": history,
+        "decision_selection": decision,
+        "raw_argmax": raw_test_metrics,
+        "selected": test_metrics,
+        "test": test_metrics,
+    }, indent=2), encoding="utf-8")
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
+    pd.DataFrame(raw_matrix, index=class_names, columns=class_names).to_csv(
+        output / "confusion_matrix_raw_argmax.csv"
+    )
     hospital_test_metrics = {}
     hospital_matrices = {}
     prediction_payload = {
         "class_names": np.asarray(class_names),
         "combined_targets": test_targets,
+        "combined_raw_probabilities": raw_test_probabilities,
+        "combined_raw_predictions": raw_test_predictions,
         "combined_probabilities": test_probabilities,
+        "combined_selected_predictions": selected_test_predictions,
     }
     hospital_dir = output / "hospital_metrics"; hospital_dir.mkdir(exist_ok=True)
     for hospital, indices in enumerate(client_test_indices, 1):
-        metrics, hospital_matrix, hospital_targets, hospital_probabilities = evaluate(
-            ema.ema, frame, indices, config, device, class_names, return_probabilities=True
+        hospital_logits, hospital_targets = predict_logits(ema.ema, frame, indices, config, device)
+        hospital_raw_probabilities = torch.softmax(torch.from_numpy(hospital_logits), dim=1).numpy()
+        hospital_raw_predictions = hospital_logits.argmax(axis=1)
+        hospital_raw_metrics, _ = classification_metrics(
+            hospital_targets, hospital_raw_probabilities, class_names, hospital_raw_predictions
         )
-        hospital_test_metrics[f"hospital_{hospital}"] = metrics
+        hospital_probabilities, hospital_predictions = apply_decision_rule(
+            hospital_logits, decision, class_names
+        )
+        metrics, hospital_matrix = classification_metrics(
+            hospital_targets, hospital_probabilities, class_names, hospital_predictions
+        )
+        hospital_test_metrics[f"hospital_{hospital}"] = {
+            "raw_argmax": hospital_raw_metrics,
+            "selected": metrics,
+        }
         hospital_matrices[f"hospital_{hospital}"] = hospital_matrix
         prediction_payload[f"hospital_{hospital}_targets"] = hospital_targets
+        prediction_payload[f"hospital_{hospital}_raw_probabilities"] = hospital_raw_probabilities
+        prediction_payload[f"hospital_{hospital}_raw_predictions"] = hospital_raw_predictions
         prediction_payload[f"hospital_{hospital}_probabilities"] = hospital_probabilities
+        prediction_payload[f"hospital_{hospital}_selected_predictions"] = hospital_predictions
         pd.DataFrame(hospital_matrix, index=class_names, columns=class_names).to_csv(
             hospital_dir / f"hospital_{hospital}_confusion_matrix.csv"
         )
     np.savez_compressed(output / "test_predictions.npz", **prediction_payload)
     save_result_plots(history, test_metrics, matrix, class_names, test_targets, test_probabilities,
                       hospital_matrices, output)
-    macro_f1 = np.array([metrics["macro_f1"] for metrics in hospital_test_metrics.values()])
-    balanced_accuracy = np.array([metrics["balanced_accuracy"] for metrics in hospital_test_metrics.values()])
+    macro_f1 = np.array([metrics["selected"]["macro_f1"] for metrics in hospital_test_metrics.values()])
+    balanced_accuracy = np.array([metrics["selected"]["balanced_accuracy"] for metrics in hospital_test_metrics.values()])
     hospital_report = {
         "final_federated_model_by_hospital": hospital_test_metrics,
+        "combined_raw_argmax": raw_test_metrics,
+        "combined_selected": test_metrics,
         "combined_test": test_metrics,
         "hospital_summary": {
             "macro_f1_mean": float(macro_f1.mean()), "macro_f1_std": float(macro_f1.std()), "worst_hospital_macro_f1": float(macro_f1.min()),

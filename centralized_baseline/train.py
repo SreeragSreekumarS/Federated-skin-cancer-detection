@@ -13,12 +13,12 @@ import torch
 from tqdm.auto import tqdm
 
 from skinfed.config import load_config, save_config
-from skinfed.data import _split_indices, cache_resized_images, read_manifest
+from skinfed.data import METADATA_FEATURE_DIM, _split_indices, cache_resized_images, encode_metadata, make_federated_splits, read_manifest
 from skinfed.federated import (
     FocalCrossEntropy, ModelEMA, evaluate, make_loader, predict_logits,
     mixup_cutmix, optimizer_parameter_groups,
 )
-from skinfed.calibration import fit_class_thresholds, fit_temperature, threshold_predictions
+from skinfed.calibration import apply_decision_rule, select_decision_rule
 from skinfed.metrics import classification_metrics
 from skinfed.model import build_model
 from skinfed.model import freeze_features
@@ -65,32 +65,55 @@ def main() -> None:
         print(f"Using {torch.cuda.get_device_name(0)}")
 
     frame, class_names = read_manifest(args.manifest)
+    if config.use_metadata:
+        encode_metadata(frame)
     if config.cache_resized_images:
         cache_dir = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
         print(f"Preparing resized-image cache at {cache_dir}")
         frame = cache_resized_images(frame, config.image_size, cache_dir)
-    train_indices, val_indices, test_indices = _split_indices(
-        frame, config.train_fraction, config.val_fraction, config.split_seed
-    )
+    hospital_partition = None
+    if config.partition_mode == "hospital_first":
+        hospital_partition = make_federated_splits(
+            frame, config.clients, config.dirichlet_alpha,
+            config.train_fraction, config.val_fraction, config.split_seed,
+        )
+        client_train, client_val, client_test, val_indices, test_indices = hospital_partition
+        train_indices = np.concatenate(client_train)
+    else:
+        train_indices, val_indices, test_indices = _split_indices(
+            frame, config.train_fraction, config.val_fraction, config.split_seed
+        )
     output = Path(args.output) / config.run_name
     output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
     (output / "class_names.json").write_text(json.dumps(class_names, indent=2), encoding="utf-8")
     assignments = []
-    for split_name, indices in (
-        ("train", train_indices),
-        ("validation", val_indices),
-        ("test", test_indices),
-    ):
-        for index in indices:
-            row = frame.iloc[int(index)]
-            assignments.append({
-                "manifest_index": int(index),
-                "image_path": getattr(row, "source_image_path", row.image_path),
-                "label": row.label,
-                "patient_id": row.patient_id,
-                "split": split_name,
-            })
+    if hospital_partition is not None:
+        for hospital, (train_part, val_part, test_part) in enumerate(
+            zip(hospital_partition[0], hospital_partition[1], hospital_partition[2]), 1
+        ):
+            for split_name, indices in (("train", train_part), ("validation", val_part), ("test", test_part)):
+                for index in indices:
+                    row = frame.iloc[int(index)]
+                    assignments.append({
+                        "manifest_index": int(index),
+                        "image_path": getattr(row, "source_image_path", row.image_path),
+                        "label": row.label,
+                        "patient_id": row.patient_id,
+                        "hospital_id": hospital,
+                        "split": split_name,
+                    })
+    else:
+        for split_name, indices in (("train", train_indices), ("validation", val_indices), ("test", test_indices)):
+            for index in indices:
+                row = frame.iloc[int(index)]
+                assignments.append({
+                    "manifest_index": int(index),
+                    "image_path": getattr(row, "source_image_path", row.image_path),
+                    "label": row.label,
+                    "patient_id": row.patient_id,
+                    "split": split_name,
+                })
     pd.DataFrame(assignments).sort_values("manifest_index").to_csv(
         output / "split_assignments.csv", index=False
     )
@@ -120,6 +143,7 @@ def main() -> None:
         classifier_dropout=config.classifier_dropout,
         drop_path_rate=config.drop_path_rate,
         model_name=config.model_name,
+        metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0,
     ).to(device)
     ema = ModelEMA(model, config.ema_decay)
     freeze_features(model, frozen=config.freeze_backbone_rounds > 0)
@@ -148,7 +172,7 @@ def main() -> None:
             frame, train_indices, config.image_size, config.batch_size,
             config.num_workers, True, config.seed + round_number,
             config.strong_augmentation, config.balanced_sampling,
-            config.cache_resized_images,
+            config.cache_resized_images, config.use_metadata,
         )
         model.train()
         for _ in range(config.local_epochs):
@@ -157,7 +181,13 @@ def main() -> None:
             train_loss_sum, train_correct, train_samples = 0.0, 0.0, 0
             optimizer.zero_grad(set_to_none=True)
             progress = tqdm(loader, desc=f"epoch {epoch_number} (round {round_number})", unit="step", dynamic_ncols=True)
-            for step, (images, targets) in enumerate(progress, 1):
+            for step, batch in enumerate(progress, 1):
+                if config.use_metadata:
+                    images, metadata, targets = batch
+                    metadata = metadata.to(device, non_blocking=True)
+                else:
+                    images, targets = batch
+                    metadata = None
                 images = images.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
                 images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
@@ -165,7 +195,7 @@ def main() -> None:
                     device_type=device.type,
                     enabled=config.amp and device.type == "cuda",
                 ):
-                    logits = model(images)
+                    logits = model(images, metadata) if config.use_metadata else model(images)
                     if not torch.isfinite(logits).all():
                         raise FloatingPointError(
                             "Training produced non-finite logits. Retry with --no-amp and a lower learning rate."
@@ -235,6 +265,7 @@ def main() -> None:
                     "classifier_hidden_dim": config.classifier_hidden_dim,
                     "classifier_dropout": config.classifier_dropout,
                     "drop_path_rate": config.drop_path_rate,
+                    "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0,
                 }, output / "best_model.pt")
             else:
                 stale += 1
@@ -255,33 +286,58 @@ def main() -> None:
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     ema.ema.load_state_dict(checkpoint["model_state"])
     validation_logits, validation_targets = predict_logits(ema.ema, frame, val_indices, config, device)
-    temperature = fit_temperature(validation_logits, validation_targets)
-    validation_probabilities = torch.softmax(torch.from_numpy(validation_logits) / temperature, dim=1).numpy()
-    thresholds = fit_class_thresholds(validation_probabilities, validation_targets, class_names)
+    train_counts = frame.iloc[train_indices].target.value_counts().reindex(
+        range(len(class_names)), fill_value=0
+    ).to_numpy()
+    decision = select_decision_rule(
+        validation_logits, validation_targets, class_names, train_counts,
+        metric=config.decision_metric,
+        preserve_melanoma_sensitivity=config.preserve_melanoma_sensitivity,
+    )
     test_logits, targets = predict_logits(ema.ema, frame, test_indices, config, device)
-    probabilities = torch.softmax(torch.from_numpy(test_logits) / temperature, dim=1).numpy()
-    predictions = threshold_predictions(probabilities, thresholds, class_names)
-    test_metrics, matrix = classification_metrics(targets, probabilities, class_names, predictions)
+    raw_probabilities = torch.softmax(torch.from_numpy(test_logits), dim=1).numpy()
+    raw_predictions = test_logits.argmax(axis=1)
+    raw_metrics, raw_matrix = classification_metrics(
+        targets, raw_probabilities, class_names, raw_predictions
+    )
+    probabilities, selected_predictions = apply_decision_rule(test_logits, decision, class_names)
+    selected_metrics, matrix = classification_metrics(
+        targets, probabilities, class_names, selected_predictions
+    )
     (output / "metrics.json").write_text(
-        json.dumps({"validation_history": history, "calibration": {"temperature": temperature, "class_thresholds": thresholds}, "test": test_metrics}, indent=2),
+        json.dumps({
+            "validation_history": history,
+            "decision_selection": decision,
+            "raw_argmax": raw_metrics,
+            "selected": selected_metrics,
+            "test": selected_metrics,
+        }, indent=2),
         encoding="utf-8",
     )
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(
         output / "confusion_matrix.csv"
     )
+    pd.DataFrame(raw_matrix, index=class_names, columns=class_names).to_csv(
+        output / "confusion_matrix_raw_argmax.csv"
+    )
     predictions: dict[str, np.ndarray] = {
         "class_names": np.asarray(class_names),
         "targets": targets,
+        "raw_probabilities": raw_probabilities,
+        "raw_predictions": raw_predictions,
+        "calibrated_probabilities": probabilities,
+        "selected_predictions": selected_predictions,
         "probabilities": probabilities,
-        "predicted_labels": predictions,
+        "predicted_labels": selected_predictions,
     }
     np.savez_compressed(output / "test_predictions.npz", **predictions)
     save_result_plots(
-        history, test_metrics, matrix, class_names, targets, probabilities,
+        history, selected_metrics, matrix, class_names, targets, probabilities,
         {}, output,
     )
     print(f"Centralized baseline saved to: {output}")
-    print(json.dumps(test_metrics, indent=2))
+    print(json.dumps({"raw_argmax": raw_metrics, "selected": selected_metrics,
+                      "decision_rule": decision["rule"]}, indent=2))
 
 
 if __name__ == "__main__":

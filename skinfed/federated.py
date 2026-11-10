@@ -79,7 +79,7 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
 
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
-                balanced_sampling=False, cache_resized=False):
+                balanced_sampling=False, cache_resized=False, use_metadata=False):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
@@ -93,6 +93,7 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
     return DataLoader(LesionDataset(
         frame, indices,
         transforms_for(image_size, training, strong_augmentation, already_resized=cache_resized),
+        use_metadata=use_metadata,
     ), batch_size=batch_size,
                       shuffle=training and sampler is None, sampler=sampler,
                       num_workers=workers, pin_memory=True, persistent_workers=workers > 0, generator=generator)
@@ -145,15 +146,23 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True,
                          config.seed + round_number, config.strong_augmentation, config.balanced_sampling,
-                         config.cache_resized_images)
+                         config.cache_resized_images, config.use_metadata)
     model.train(); optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):
-        for step, (images, targets) in enumerate(loader, 1):
+        for step, batch in enumerate(loader, 1):
+            if config.use_metadata:
+                images, metadata, targets = batch
+                metadata = metadata.to(device, non_blocking=True)
+            else:
+                images, targets = batch
+                metadata = None
             images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
             images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
             with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
-                logits = model(images)
+                logits = model(images, metadata) if config.use_metadata else model(images)
+                if not torch.isfinite(logits).all():
+                    raise FloatingPointError("Federated training produced non-finite logits; retry with --no-amp and lower learning rates.")
                 task_loss = criterion(logits, targets_a)
                 if targets_b is not None:
                     task_loss = mix_lambda * task_loss + (1 - mix_lambda) * criterion(logits, targets_b)
@@ -162,6 +171,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                     prox = sum((p - reference[n]).pow(2).sum() for n, p in model.named_parameters())
                     loss = loss + 0.5 * config.fedprox_mu * prox
                 loss = loss / config.gradient_accumulation
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Federated training produced a non-finite loss; retry with --no-amp and lower learning rates.")
             batch_size = targets.size(0)
             train_loss_sum += float(task_loss.detach()) * batch_size
             predictions = logits.detach().argmax(dim=1)
@@ -210,13 +221,23 @@ def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, n
     loader = make_loader(
         frame, indices, config.image_size, config.batch_size, config.num_workers,
         False, config.seed, cache_resized=config.cache_resized_images,
+        use_metadata=config.use_metadata,
     )
     model.eval(); logits_all, targets = [], []
     view_count = config.tta_views if config.tta else 1
-    for images, labels in loader:
+    for batch in loader:
+        if config.use_metadata:
+            images, metadata, labels = batch
+            metadata = metadata.to(device, non_blocking=True)
+        else:
+            images, labels = batch
+            metadata = None
         images = images.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
-            logits = torch.stack([model(view) for view in dihedral_views(images, view_count)]).mean(dim=0)
+            logits = torch.stack([
+                model(view, metadata) if config.use_metadata else model(view)
+                for view in dihedral_views(images, view_count)
+            ]).mean(dim=0)
         if not torch.isfinite(logits).all():
             raise FloatingPointError(
                 "Model inference produced non-finite logits before probability calculation. "
