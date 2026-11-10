@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+from tqdm.auto import tqdm
 
 from skinfed.config import load_config, save_config
 from skinfed.data import _split_indices, cache_resized_images, read_manifest
@@ -127,7 +129,9 @@ def main() -> None:
     current_lr = config.learning_rate
     history: list[dict] = []
     # Each centralized round makes local_epochs passes through the full global
-    # training partition. Validation and early stopping remain round-based.
+    # training partition. Emit live batch progress and validate after each epoch.
+    epoch_number = 0
+    stop_training = False
     for round_number in range(1, config.rounds + 1):
         frozen = round_number <= config.freeze_backbone_rounds
         freeze_features(model, frozen=frozen)
@@ -146,8 +150,12 @@ def main() -> None:
         )
         model.train()
         for _ in range(config.local_epochs):
+            epoch_number += 1
+            epoch_started = time.perf_counter()
+            train_loss_sum, train_correct, train_samples = 0.0, 0.0, 0
             optimizer.zero_grad(set_to_none=True)
-            for step, (images, targets) in enumerate(loader, 1):
+            progress = tqdm(loader, desc=f"epoch {epoch_number} (round {round_number})", unit="step", dynamic_ncols=True)
+            for step, (images, targets) in enumerate(progress, 1):
                 images = images.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
                 images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
@@ -160,6 +168,17 @@ def main() -> None:
                     if targets_b is not None:
                         loss = mix_lambda * loss + (1 - mix_lambda) * criterion(logits, targets_b)
                     loss = loss / config.gradient_accumulation
+                batch_size = targets.size(0)
+                train_loss_sum += float(loss.detach()) * config.gradient_accumulation * batch_size
+                batch_predictions = logits.detach().argmax(dim=1)
+                if targets_b is None:
+                    train_correct += float((batch_predictions == targets_a).sum())
+                else:
+                    train_correct += float(
+                        mix_lambda * (batch_predictions == targets_a).sum()
+                        + (1 - mix_lambda) * (batch_predictions == targets_b).sum()
+                    )
+                train_samples += batch_size
                 scaler.scale(loss).backward()
                 if step % config.gradient_accumulation == 0 or step == len(loader):
                     scaler.unscale_(optimizer)
@@ -168,37 +187,60 @@ def main() -> None:
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
                     ema.update(model)
+                elapsed = time.perf_counter() - epoch_started
+                progress.set_postfix(
+                    loss=f"{train_loss_sum / max(1, train_samples):.4f}",
+                    accuracy=f"{train_correct / max(1, train_samples):.4f}",
+                    elapsed=f"{elapsed:.0f}s",
+                    step=f"{elapsed / step * 1000:.0f}ms",
+                    refresh=False,
+                )
+            progress.close()
             scheduler.step()
-
-        metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
-        metrics.update({"round": round_number, "learning_rate": current_lr})
-        history.append(metrics)
-        print(
-            f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, "
-            f"balanced accuracy={metrics['balanced_accuracy']:.4f}"
-        )
-        if metrics["macro_f1"] > best_f1:
-            best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
-            torch.save({
-                "model_state": ema.ema.state_dict(),
-                "class_names": class_names,
-                "model_name": config.model_name,
-                "image_size": config.image_size,
-                "classifier_hidden_dim": config.classifier_hidden_dim,
-                "classifier_dropout": config.classifier_dropout,
-                "drop_path_rate": config.drop_path_rate,
-            }, output / "best_model.pt")
-        else:
-            stale += 1
-            lr_stale += 1
-            if lr_stale >= config.lr_patience and current_lr > config.min_learning_rate:
-                updated_lr = max(config.min_learning_rate, current_lr * config.lr_factor)
-                if updated_lr < current_lr:
-                    current_lr, lr_stale = updated_lr, 0
-                    print(f"Reducing centralized learning rate to {current_lr:.2e}")
-            if stale >= config.early_stopping_patience:
-                print("Early stopping: validation macro-F1 did not improve.")
+            metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
+            metrics.update({
+                "round": round_number, "epoch": epoch_number,
+                "learning_rate": current_lr,
+                "train_loss": train_loss_sum / max(1, train_samples),
+                "train_accuracy": train_correct / max(1, train_samples),
+                "epoch_seconds": time.perf_counter() - epoch_started,
+                "milliseconds_per_step": (time.perf_counter() - epoch_started) / max(1, len(loader)) * 1000,
+            })
+            history.append(metrics)
+            print(
+                f"epoch {epoch_number}: loss={metrics['train_loss']:.4f} "
+                f"accuracy={metrics['train_accuracy']:.4f} "
+                f"val_loss={metrics['log_loss']:.4f} val_accuracy={metrics['accuracy']:.4f} "
+                f"val_macro_f1={metrics['macro_f1']:.4f} "
+                f"time={metrics['epoch_seconds']:.1f}s "
+                f"step={metrics['milliseconds_per_step']:.0f}ms"
+            )
+            if metrics["macro_f1"] > best_f1:
+                best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
+                torch.save({
+                    "model_state": ema.ema.state_dict(),
+                    "class_names": class_names,
+                    "model_name": config.model_name,
+                    "image_size": config.image_size,
+                    "classifier_hidden_dim": config.classifier_hidden_dim,
+                    "classifier_dropout": config.classifier_dropout,
+                    "drop_path_rate": config.drop_path_rate,
+                }, output / "best_model.pt")
+            else:
+                stale += 1
+                lr_stale += 1
+                if lr_stale >= config.lr_patience and current_lr > config.min_learning_rate:
+                    updated_lr = max(config.min_learning_rate, current_lr * config.lr_factor)
+                    if updated_lr < current_lr:
+                        current_lr, lr_stale = updated_lr, 0
+                        print(f"Reducing centralized learning rate to {current_lr:.2e} on next round")
+                if stale >= config.early_stopping_patience:
+                    print("Early stopping: validation macro-F1 did not improve.")
+                    stop_training = True
+            if stop_training:
                 break
+        if stop_training:
+            break
 
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     ema.ema.load_state_dict(checkpoint["model_state"])

@@ -47,7 +47,7 @@ Run the centralized comparison with the same manifest and config as the federate
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
 ```
 
-Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
+Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
 
 To compare centralized MobileNetV3 with and without CBAM on the same data split, use a distinct run name:
 
