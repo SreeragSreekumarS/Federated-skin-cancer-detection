@@ -49,6 +49,14 @@ python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.
 
 Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. `split_seed` stays fixed at 42 by default, so runs with different training seeds share the exact group-aware partitions. Temperature and per-class decision thresholds are fitted on validation predictions only; the held-out test set is used once for reporting.
 
+To compare centralized MobileNetV3 with and without CBAM on the same data split, use a distinct run name:
+
+```bash
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml --no-cbam --run-name ham10000_mobilenetv3_no_cbam
+```
+
+The saved `config.yaml` records `use_cbam: false`; results are written to `runs/centralized/ham10000_mobilenetv3_no_cbam/`. Compare against the CBAM run using the same manifest, config, and split seed.
+
 It creates one deterministic, group-aware train/validation/test split over the full manifest and trains a single model on the full centralized training partition; it does not create simulated hospitals. The model, image transforms, loss, optimizer, and validation-based checkpointing use the matching config; FedProx and server aggregation do not apply centrally. Because the federated workflow assigns groups to hospitals before splitting within each hospital, its exact row assignments differ from this global centralized split. Results are saved separately under `runs/centralized/<run_name>/`, including `split_assignments.csv` so the rows can be audited.
 
 Every metric report includes accuracy, balanced accuracy, micro/macro/weighted precision-recall-F1, one-vs-rest ROC-AUC, average precision, top-2 accuracy, Cohen's kappa, Matthews correlation coefficient, and log loss. For every class it includes precision (PPV), sensitivity/recall, specificity, negative predictive value, F1, ROC-AUC, average precision, false-positive/false-negative rates, TP/TN/FP/FN counts, and support. Confusion matrices are saved separately.

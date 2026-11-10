@@ -39,6 +39,7 @@ def main() -> None:
     parser.add_argument("--config", default="config/gtx1650.yaml")
     parser.add_argument("--output", default="runs/centralized")
     parser.add_argument("--no-pretrained", action="store_true")
+    parser.add_argument("--no-cbam", action="store_true", help="Disable the MobileNetV3 CBAM attention block")
     parser.add_argument("--seed", type=int, help="Training seed; split_seed stays fixed for repeated-seed ensembles")
     parser.add_argument("--run-name")
     parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
@@ -50,6 +51,7 @@ def main() -> None:
     if args.run_name: config.run_name = args.run_name
     if args.model_name: config.model_name = args.model_name
     if args.image_size: config.image_size = args.image_size
+    if args.no_cbam: config.use_cbam = False
     config.validate()
     seed_everything(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
