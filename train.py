@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--output", default="runs")
     parser.add_argument("--no-pretrained", action="store_true", help="Do not download/use ImageNet weights (only for offline smoke tests)")
     parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision for numerical stability")
+    parser.add_argument("--aggregation-weighting", choices=("samples", "quality"), help="Federated aggregation weights")
     parser.add_argument("--seed", type=int, help="Training seed; split_seed remains fixed for repeated-seed ensembles")
     parser.add_argument("--run-name")
     parser.add_argument("--model-name", help="Model name, including timm models such as mobilenetv4_conv_medium")
@@ -36,11 +37,13 @@ def main():
     if args.model_name: config.model_name = args.model_name
     if args.image_size: config.image_size = args.image_size
     if args.no_amp: config.amp = False
+    if args.aggregation_weighting: config.aggregation_weighting = args.aggregation_weighting
     config.validate(); seed_everything(config.seed)
     config.partition_mode = "hospital_first"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
+    print(f"Federated aggregation weighting: {config.aggregation_weighting}")
     frame, class_names = read_manifest(args.manifest)
     if config.use_metadata:
         encode_metadata(frame)
@@ -49,7 +52,8 @@ def main():
         print(f"Preparing resized-image cache at {cache_dir}")
         frame = cache_resized_images(frame, config.image_size, cache_dir)
     client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_federated_splits(
-        frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction, config.split_seed
+        frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction,
+        config.split_seed, config.min_groups_per_class_per_hospital,
     )
     output = Path(args.output) / config.run_name; output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
@@ -96,7 +100,7 @@ def main():
             train_client(model, frame, client_indices[i], client_val_indices[i], config, device, weights, round_number, current_lr)
             for i in selected
         ]
-        aggregate(model, updates)
+        aggregate(model, updates, config.aggregation_weighting)
         ema.update(model)
         metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
         metrics["round"] = round_number; metrics["learning_rate"] = current_lr; metrics["selected_hospitals"] = [int(x) + 1 for x in selected]

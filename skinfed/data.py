@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import os
 import threading
+import warnings
 from pathlib import Path
 import random
 from itertools import combinations
@@ -88,7 +89,15 @@ def _split_indices(frame: pd.DataFrame, train: float, val: float, seed: int) -> 
     # class proportions. This keeps lesions together while reducing empty-class
     # validation/test splits caused by unstratified group sampling.
     try:
-        splitter = StratifiedGroupKFold(n_splits=10, shuffle=True, random_state=seed)
+        row_support = pd.Series(labels).value_counts().min()
+        group_support = pd.DataFrame({"group": groups, "label": labels}).groupby("label")["group"].nunique().min()
+        n_splits = min(10, int(row_support), int(group_support))
+        # Three or more folds preserve the requested 70/15/15 proportions better.
+        # Smaller rare-class counts use the group-only fallback below without
+        # asking sklearn to make impossible stratified folds.
+        if n_splits < 3:
+            raise ValueError("Too few groups per class for stratified grouped folds")
+        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
         folds = [holdout for _, holdout in splitter.split(indices, labels, groups)]
         class_counts = np.bincount(labels)
         target_holdout = 1.0 - train
@@ -101,15 +110,23 @@ def _split_indices(frame: pd.DataFrame, train: float, val: float, seed: int) -> 
             return size_error + class_error + missing_class_penalty
 
         holdout_idx = min(
-            (np.concatenate([folds[i] for i in choice]) for choice in combinations(range(10), max(1, round(target_holdout * 10)))),
+            (np.concatenate([folds[i] for i in choice]) for choice in combinations(
+                range(n_splits), max(1, round(target_holdout * n_splits))
+            )),
             key=lambda candidate: split_cost(candidate, target_holdout),
         )
         train_idx = np.setdiff1d(indices, holdout_idx, assume_unique=False)
         holdout_labels = labels[holdout_idx]
         holdout_groups = groups[holdout_idx]
-        inner = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=seed + 1)
-        inner_splits = list(inner.split(holdout_idx, holdout_labels, holdout_groups))
         val_ratio = val / (1.0 - train)
+        inner_row_support = pd.Series(holdout_labels).value_counts().min()
+        inner_group_support = pd.DataFrame({"group": holdout_groups, "label": holdout_labels}).groupby("label")["group"].nunique().min()
+        if min(int(inner_row_support), int(inner_group_support)) >= 2:
+            inner = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=seed + 1)
+            inner_splits = list(inner.split(holdout_idx, holdout_labels, holdout_groups))
+        else:
+            inner = GroupShuffleSplit(n_splits=2, train_size=val_ratio, random_state=seed + 1)
+            inner_splits = list(inner.split(holdout_idx, holdout_labels, holdout_groups))
 
         def inner_cost(val_rel: np.ndarray) -> float:
             class_counts = np.bincount(holdout_labels, minlength=len(np.bincount(labels)))
@@ -141,7 +158,10 @@ def _split_indices(frame: pd.DataFrame, train: float, val: float, seed: int) -> 
         return train_idx, holdout_idx[val_rel], holdout_idx[test_rel]
 
 
-def _assign_groups_to_hospitals(frame: pd.DataFrame, clients: int, alpha: float, seed: int) -> list[np.ndarray]:
+def _assign_groups_to_hospitals(
+    frame: pd.DataFrame, clients: int, alpha: float, seed: int,
+    min_groups_per_class_per_hospital: int = 3,
+) -> list[np.ndarray]:
     """Assign every patient/lesion group to exactly one simulated hospital."""
     rng = np.random.default_rng(seed)
     labels = frame.target.to_numpy()
@@ -151,12 +171,26 @@ def _assign_groups_to_hospitals(frame: pd.DataFrame, clients: int, alpha: float,
     group_labels = group_frame.groupby("group")["label"].agg(
         lambda values: int(values.value_counts().sort_index().idxmax())
     )
+    class_names = sorted(frame.label.astype(str).unique().tolist())
     hospitals: list[list[str]] = [[] for _ in range(clients)]
     for cls in sorted(group_labels.unique()):
         groups = group_labels.index[group_labels.to_numpy() == cls].to_numpy().copy()
         rng.shuffle(groups)
         proportions = rng.dirichlet(np.repeat(alpha, clients))
-        cuts = (np.cumsum(proportions)[:-1] * len(groups)).astype(int)
+        if len(groups) < clients * min_groups_per_class_per_hospital:
+            warnings.warn(
+                f"Class {class_names[int(cls)]} "
+                f"has {len(groups)} lesion/patient groups; cannot meet the requested minimum "
+                f"of {min_groups_per_class_per_hospital} per hospital across {clients} hospitals.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        feasible_minimum = min(min_groups_per_class_per_hospital, len(groups) // clients)
+        counts = np.full(clients, feasible_minimum, dtype=int)
+        remaining = len(groups) - int(counts.sum())
+        if remaining:
+            counts += rng.multinomial(remaining, proportions)
+        cuts = np.cumsum(counts)[:-1]
         for hospital, shard in enumerate(np.split(groups, cuts)):
             hospitals[hospital].extend(shard.tolist())
     # Ensure each simulated hospital has groups available for downstream splits.
@@ -169,14 +203,19 @@ def _assign_groups_to_hospitals(frame: pd.DataFrame, clients: int, alpha: float,
     return [np.flatnonzero(np.isin(group_values, groups)) for groups in hospitals]
 
 
-def make_federated_splits(frame: pd.DataFrame, clients: int, alpha: float, train: float, val: float, seed: int):
+def make_federated_splits(
+    frame: pd.DataFrame, clients: int, alpha: float, train: float, val: float, seed: int,
+    min_groups_per_class_per_hospital: int = 3,
+):
     """Create non-IID hospital train/validation/test subsets plus combined indices.
 
     Each patient/lesion group is assigned to one hospital first. Train,
     validation, and test are then split independently within each hospital.
     Hospital membership is simulated unless the manifest supplies institution IDs.
     """
-    hospital_indices = _assign_groups_to_hospitals(frame, clients, alpha, seed)
+    hospital_indices = _assign_groups_to_hospitals(
+        frame, clients, alpha, seed, min_groups_per_class_per_hospital
+    )
     client_train, client_val, client_test = [], [], []
     for hospital, indices in enumerate(hospital_indices):
         hospital_frame = frame.iloc[indices].reset_index(drop=True)
@@ -196,6 +235,34 @@ def make_federated_splits(frame: pd.DataFrame, clients: int, alpha: float, train
                 previous = group_membership.setdefault(group, (hospital, split_name))
                 if previous != (hospital, split_name):
                     raise RuntimeError(f"Patient/lesion group {group!r} crosses a hospital or split boundary")
+
+    group_labels = frame.groupby(frame.patient_id.astype(str))["label"].agg(
+        lambda values: str(values.astype(str).value_counts().sort_index().idxmax())
+    )
+    class_names = sorted(frame.label.astype(str).unique().tolist())
+    rows = []
+    for hospital, parts in enumerate(zip(client_train, client_val, client_test), 1):
+        for split_name, indices in zip(("train", "validation", "test"), parts):
+            groups = frame.iloc[indices].patient_id.astype(str).unique()
+            counts = group_labels.reindex(groups).value_counts()
+            rows.append({
+                "hospital": f"hospital_{hospital}", "split": split_name,
+                **{name: int(counts.get(name, 0)) for name in class_names},
+            })
+    class_table = pd.DataFrame(rows).set_index(["hospital", "split"])
+    print("Hospital × split × class counts (patient/lesion groups):")
+    print(class_table.to_string())
+    missing = [
+        f"{hospital}/{split}/{class_name}"
+        for (hospital, split), values in class_table.iterrows()
+        for class_name, count in values.items() if count == 0
+    ]
+    if missing:
+        warnings.warn(
+            "Some hospital splits have no groups for a class: " + ", ".join(missing),
+            RuntimeWarning,
+            stacklevel=2,
+        )
     val_indices = np.concatenate(client_val)
     test_indices = np.concatenate(client_test)
     return client_train, client_val, client_test, val_indices, test_indices

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 from sklearn.metrics import (
-    accuracy_score, average_precision_score, balanced_accuracy_score, cohen_kappa_score,
+    accuracy_score, average_precision_score, cohen_kappa_score,
     confusion_matrix, log_loss, matthews_corrcoef, precision_recall_fscore_support,
     roc_auc_score, top_k_accuracy_score,
 )
@@ -25,6 +25,7 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
         raise ValueError("predicted_labels must contain one valid class index per target")
     labels = np.arange(len(class_names))
     precision, recall, f1, support = precision_recall_fscore_support(y_true, y_pred, labels=labels, zero_division=0)
+    present = support > 0
     matrix = confusion_matrix(y_true, y_pred, labels=labels)
     per_class = {}
     for i in labels:
@@ -48,10 +49,13 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
             "true_positives": int(tp), "true_negatives": int(tn),
             "false_positives": int(fp), "false_negatives": int(fn), "support": int(support[i]),
         }
-    try:
-        auc = roc_auc_score(y_true, probabilities, labels=labels, multi_class="ovr", average="macro")
-    except ValueError:  # A held-out split without every class cannot define multiclass AUC.
+    if np.unique(y_true).size < 2:
         auc = None
+    else:
+        try:
+            auc = roc_auc_score(y_true, probabilities, labels=labels, multi_class="ovr", average="macro")
+        except ValueError:  # A held-out split without every class cannot define multiclass AUC.
+            auc = None
     valid_average_precisions = [
         item["average_precision"] for item in per_class.values()
         if item["average_precision"] is not None
@@ -72,7 +76,8 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
     )
     results = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(recall[present].mean()) if present.any() else 0.0,
+        "macro_f1_present": float(f1[present].mean()) if present.any() else 0.0,
         "macro_precision": float(macro_precision), "macro_recall": float(macro_recall), "macro_f1": float(macro_f1),
         "weighted_precision": float(weighted_precision), "weighted_recall": float(weighted_recall), "weighted_f1": float(weighted_f1),
         "micro_precision": float(micro_precision), "micro_recall": float(micro_recall), "micro_f1": float(micro_f1),

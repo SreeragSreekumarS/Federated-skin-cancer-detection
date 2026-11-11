@@ -15,13 +15,17 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 2026])
     parser.add_argument("--output-root", default="runs")
     parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision for every seed run")
+    parser.add_argument("--aggregation-weighting", choices=("samples", "quality"), help="Federated aggregation rule")
     args = parser.parse_args()
+    if args.mode == "centralized" and args.aggregation_weighting:
+        parser.error("aggregation weighting applies only to federated runs")
 
     config = Path(args.config)
     if not config.is_file():
         parser.error(f"config not found: {config}")
     for seed in args.seeds:
-        run_name = f"{config.stem}_seed{seed}"
+        weighting_suffix = f"_{args.aggregation_weighting}" if args.aggregation_weighting else ""
+        run_name = f"{config.stem}{weighting_suffix}_seed{seed}"
         if args.mode == "centralized":
             command = [
                 sys.executable, "-m", "centralized_baseline.train",
@@ -37,6 +41,8 @@ def main() -> None:
             ]
         if args.no_amp:
             command.append("--no-amp")
+        if args.aggregation_weighting:
+            command.extend(["--aggregation-weighting", args.aggregation_weighting])
         print("\nRunning:", " ".join(command), flush=True)
         subprocess.run(command, check=True)
 

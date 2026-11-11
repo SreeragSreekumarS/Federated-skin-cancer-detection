@@ -15,6 +15,8 @@ class TrainConfig:
     use_metadata: bool = False
     decision_metric: str = "accuracy"
     preserve_melanoma_sensitivity: bool = True
+    aggregation_weighting: str = "samples"
+    min_groups_per_class_per_hospital: int = 3
     clients: int = 3
     dirichlet_alpha: float = 1.0
     rounds: int = 30
@@ -66,6 +68,10 @@ class TrainConfig:
             raise ValueError("decision_metric must be accuracy, balanced_accuracy, or macro_f1")
         if self.partition_mode not in {"global", "hospital_first"}:
             raise ValueError("partition_mode must be global or hospital_first")
+        if self.aggregation_weighting not in {"samples", "quality"}:
+            raise ValueError("aggregation_weighting must be samples or quality")
+        if self.min_groups_per_class_per_hospital < 1:
+            raise ValueError("min_groups_per_class_per_hospital must be at least 1")
         if self.dirichlet_alpha <= 0 or not 0 < self.client_fraction <= 1:
             raise ValueError("dirichlet_alpha must be positive and client_fraction must be in (0, 1]")
         if self.classifier_hidden_dim < 1 or not 0 <= self.classifier_dropout < 1:

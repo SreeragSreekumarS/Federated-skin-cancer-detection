@@ -6,6 +6,8 @@ model_name: mobilenet_v3_large
 use_metadata: true
 decision_metric: accuracy
 preserve_melanoma_sensitivity: true
+aggregation_weighting: samples
+min_groups_per_class_per_hospital: 3
 clients: 3
 dirichlet_alpha: 1.0
 rounds: 30

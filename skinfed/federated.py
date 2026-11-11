@@ -65,9 +65,14 @@ def optimizer_parameter_groups(model: nn.Module, config, head_learning_rate: flo
     return groups
 
 
-def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, float, dict]]) -> None:
-    # Weight client updates by data volume and bounded validation quality, preventing a tiny client dominating.
-    weights = np.array([samples * max(0.25, quality) for _, samples, quality, _ in updates], dtype=float)
+def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, float, dict]], weighting: str = "samples") -> None:
+    """Aggregate local EMA states using FedAvg or optional present-class quality weights."""
+    if weighting not in {"samples", "quality"}:
+        raise ValueError("weighting must be samples or quality")
+    if weighting == "samples":
+        weights = np.array([samples for _, samples, _, _ in updates], dtype=float)
+    else:
+        weights = np.array([samples * max(0.25, quality) for _, samples, quality, _ in updates], dtype=float)
     weights /= weights.sum()
     merged = OrderedDict()
     for key, initial in global_model.state_dict().items():
@@ -187,10 +192,12 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                 ema.update(model)
         scheduler.step()
     local_metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, [str(x) for x in sorted(frame.label.astype(str).unique())])
-    quality = local_metrics["macro_f1"]
+    quality = local_metrics["macro_f1_present"]
+    local_metrics["aggregation_quality_macro_f1_present"] = quality
     local_metrics["train_accuracy"] = train_correct / max(1, train_samples)
     local_metrics["train_loss"] = train_loss_sum / max(1, train_samples)
-    update = state_cpu(model)
+    # Score and transmit the same EMA model, including its EMA-updated BN buffers.
+    update = state_cpu(ema.ema)
     del model
     if device.type == "cuda": torch.cuda.empty_cache()
     return update, len(indices), quality, local_metrics

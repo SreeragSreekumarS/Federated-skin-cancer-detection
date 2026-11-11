@@ -10,7 +10,7 @@ This is a research tool, not a medical device. Do not use its output to diagnose
 
 - Patient/lesion groups are assigned to one simulated hospital first, then split into train/validation/test within that hospital, preventing group leakage across partitions.
 - Deterministic, class-dependent Dirichlet hospital assignment creates non-IID clients; class-balanced focal loss, pretrained transfer learning, and early stopping improve robust performance rather than training accuracy alone.
-- FedProx reduces client drift. Server aggregation considers sample count and validation quality.
+- FedProx reduces client drift. Sample-count FedAvg is the default; supported-class validation-quality weighting is an explicit comparison option.
 - Macro F1, balanced accuracy, per-class sensitivity/specificity, ROC-AUC, and a confusion matrix are reported, not only accuracy.
 - The supplied classifier profiles cover 288, 320, and 384 px inputs. Mixed precision, resized-image caching, sequential client simulation, adaptive learning-rate reduction, and gradient accumulation support the supplied hardware profiles.
 - The optional CBAM head adapts the attention idea from multi-task lesion research to a classification-only dataset. A compact LayerNorm/dropout classifier head regularizes the CBAM-refined features without failing on small hospital batches. It does **not** claim segmentation, because segmentation masks are not part of this project's manifest.
@@ -151,11 +151,33 @@ python tools/run_seed_sweep.py --mode federated --manifest data/ISIC2019/isic201
 python tools/run_seed_sweep.py --mode federated --manifest data/ISIC2019/isic2019_metadata_manifest.csv --config config/isic2019_v3_320_cbam.yaml --seeds 42 123 2026
 ```
 
+For the controlled HAM10000 2×2 comparison (federated/centralized × metadata/no metadata), use the metadata profile above and the matching `config/ham10000_v3_320_no_cbam_nometa.yaml` profile. Apart from the run name, only `use_metadata` differs. Run each mode three times:
+
+```bash
+python tools/run_seed_sweep.py --mode federated --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode federated --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam_nometa.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode centralized --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seeds 42 123 2026
+python tools/run_seed_sweep.py --mode centralized --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam_nometa.yaml --seeds 42 123 2026
+```
+
+Federated aggregation defaults to sample-count FedAvg. To compare the optional supported-class validation-quality weighting on one matched seed, run the same config and seed once with each weighting:
+
+```bash
+python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seed 42 --run-name ham10000_v3_seed42_samples --aggregation-weighting samples
+python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_320_no_cbam.yaml --seed 42 --run-name ham10000_v3_seed42_quality --aggregation-weighting quality
+```
+
+`make_federated_splits` tries to assign at least three groups of each class to each hospital when the dataset has enough groups. If that minimum is impossible for a rare class, it warns and distributes the available groups as evenly as possible. At startup it prints the hospital × split × class group-count table and warns about missing class/split combinations. The saved `split_assignments.csv` records the exact partition.
+
+`aggregation_weighting: samples` is plain FedAvg by client sample count. `quality` multiplies sample count by validation macro-F1 over classes present in that client's validation labels. Clients submit their EMA model state, matching the state used for quality evaluation.
+
 If the ISIC V4 reference run used `--no-amp`, add `--no-amp` to the corresponding sweeps for an apples-to-apples optimization recipe. Summarize a seed group with repeated `--run` arguments, for example:
 
 ```bash
 python tools/summarize_seed_runs.py --run runs/ham10000_v3_320_no_cbam_seed42 --run runs/ham10000_v3_320_no_cbam_seed123 --run runs/ham10000_v3_320_no_cbam_seed2026 --output runs/ham10000_federated_v3_seed_summary.csv
 ```
+
+Use the same summarizer separately for each of the four 2×2 groups. For example, centralized metadata-off results are under `runs/centralized/ham10000_v3_320_no_cbam_nometa_seed<seed>/`; federated results use `runs/ham10000_v3_320_no_cbam_nometa_seed<seed>/`. Keep each group separate so the metadata and federation effects can be compared independently.
 
 ## Classifier runs with segmentation
 

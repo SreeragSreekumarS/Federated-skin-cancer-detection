@@ -76,6 +76,7 @@ def main() -> None:
         hospital_partition = make_federated_splits(
             frame, config.clients, config.dirichlet_alpha,
             config.train_fraction, config.val_fraction, config.split_seed,
+            config.min_groups_per_class_per_hospital,
         )
         client_train, client_val, client_test, val_indices, test_indices = hospital_partition
         train_indices = np.concatenate(client_train)
