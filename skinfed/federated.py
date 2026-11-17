@@ -94,7 +94,8 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
 
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
-                balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False):
+                balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False,
+                hair_removal_probability=0.0):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
@@ -108,7 +109,8 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
     return DataLoader(LesionDataset(
         frame, indices,
         transforms_for(image_size, training, strong_augmentation, already_resized=cache_resized,
-                       image_enhancement=image_enhancement),
+                       image_enhancement=image_enhancement,
+                       hair_removal_probability=hair_removal_probability if training else 0.0),
         use_metadata=use_metadata,
     ), batch_size=batch_size,
                       shuffle=training and sampler is None, sampler=sampler,
@@ -168,7 +170,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True,
                          config.seed + round_number, config.strong_augmentation, config.balanced_sampling,
-                         config.cache_resized_images, config.use_metadata, config.image_enhancement)
+                         config.cache_resized_images, config.use_metadata, config.image_enhancement,
+                         config.hair_removal_probability)
     model.train(); optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):

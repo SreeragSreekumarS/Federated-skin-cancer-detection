@@ -37,7 +37,7 @@ The first run downloads ImageNet weights unless `--no-pretrained` is supplied. T
 
 ### Single-run 384 px accuracy-focused profile
 
-For one HAM10000 federated run without a seed sweep, use the accuracy-focused MobileNetV3-Large + CBAM + metadata profile. It selects the checkpoint by validation accuracy, uses ordinary unweighted cross-entropy and mild training-only contrast/sharpness enhancement, with the existing geometric/color augmentations, EMA, and 8-view test-time augmentation:
+For one HAM10000 federated run without a seed sweep, use the accuracy-focused MobileNetV3-Large + CBAM + metadata profile. It selects the checkpoint by validation accuracy, uses ordinary unweighted cross-entropy and mild randomized training-only contrast/sharpness enhancement plus DullRazor-style hair detection and inpainting, with the existing geometric/color augmentations, EMA, and 8-view test-time augmentation. Hair removal requires `opencv-python-headless` from `requirements.txt`:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_accuracy.yaml

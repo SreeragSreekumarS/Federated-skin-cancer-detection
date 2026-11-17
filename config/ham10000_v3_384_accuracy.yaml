@@ -48,5 +48,6 @@ tta_views: 8
 amp: true
 strong_augmentation: true
 image_enhancement: true
+hair_removal_probability: 0.15
 balanced_sampling: false
 cache_resized_images: true

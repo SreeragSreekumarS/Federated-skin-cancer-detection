@@ -59,6 +59,7 @@ class TrainConfig:
     amp: bool = True
     strong_augmentation: bool = False
     image_enhancement: bool = False
+    hair_removal_probability: float = 0.0
     balanced_sampling: bool = False
     cache_resized_images: bool = False
 
@@ -73,6 +74,8 @@ class TrainConfig:
             raise ValueError("checkpoint_metric must be accuracy or macro_f1")
         if self.class_weighting not in {"auto", "inverse_frequency", "none"}:
             raise ValueError("class_weighting must be auto, inverse_frequency, or none")
+        if not 0 <= self.hair_removal_probability <= 1:
+            raise ValueError("hair_removal_probability must be in [0, 1]")
         if self.partition_mode not in {"global", "hospital_first"}:
             raise ValueError("partition_mode must be global or hospital_first")
         if self.aggregation_weighting not in {"samples", "quality"}:

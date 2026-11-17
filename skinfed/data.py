@@ -27,6 +27,29 @@ SITE_VALUES = (
 METADATA_FEATURE_DIM = 2 + len(SEX_VALUES) + len(SITE_VALUES)
 
 
+class RandomHairRemoval:
+    """DullRazor-style black-hat detection and inpainting, applied stochastically."""
+    def __init__(self, probability: float = 0.0):
+        self.probability = probability
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        if self.probability <= 0 or random.random() >= self.probability:
+            return image
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hair removal requires opencv-python-headless; install the updated requirements.txt."
+            ) from exc
+        rgb = np.asarray(image.convert("RGB"))
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+        hair = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        _, mask = cv2.threshold(hair, 10, 255, cv2.THRESH_BINARY)
+        cleaned = cv2.inpaint(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), mask, 2, cv2.INPAINT_TELEA)
+        return Image.fromarray(cv2.cvtColor(cleaned, cv2.COLOR_BGR2RGB))
+
+
 def encode_metadata(frame: pd.DataFrame) -> np.ndarray:
     """Encode only age, sex, and anatomical site with fixed vocabularies."""
     missing = {"age", "sex", "site"} - set(frame.columns)
@@ -329,11 +352,13 @@ def transforms_for(
     strong_augmentation: bool = False,
     already_resized: bool = False,
     image_enhancement: bool = False,
+    hair_removal_probability: float = 0.0,
 ):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     if training:
         augmentations = [
             *([] if already_resized else [ResizeWithPad(image_size)]),
+            RandomHairRemoval(hair_removal_probability),
             transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
             transforms.RandomRotation(15, fill=(123, 116, 103)),
             transforms.ColorJitter(0.12, 0.12, 0.08, 0.03),
