@@ -15,7 +15,7 @@ from tqdm.auto import tqdm
 from skinfed.config import load_config, save_config
 from skinfed.data import METADATA_FEATURE_DIM, _split_indices, cache_resized_images, encode_metadata, make_federated_splits, read_manifest
 from skinfed.federated import (
-    FocalCrossEntropy, ModelEMA, evaluate, make_loader, predict_logits,
+    FocalCrossEntropy, ModelEMA, configured_loss_weights, evaluate, make_loader, predict_logits,
     mixup_cutmix, optimizer_parameter_groups,
 )
 from skinfed.calibration import apply_decision_rule, select_decision_rule
@@ -133,7 +133,7 @@ def main() -> None:
     class_weights = torch.tensor(
         counts.sum() / (len(counts) * counts), dtype=torch.float32
     )
-    loss_weights = torch.ones_like(class_weights) if config.balanced_sampling else class_weights
+    loss_weights = configured_loss_weights(class_weights, config)
     criterion = FocalCrossEntropy(
         loss_weights.to(device), config.focal_gamma, config.label_smoothing
     )
@@ -152,7 +152,7 @@ def main() -> None:
         device.type, enabled=config.amp and device.type == "cuda"
     )
 
-    best_f1, stale, lr_stale = -1.0, 0, 0
+    best_score, stale, lr_stale = -1.0, 0, 0
     current_lr = config.learning_rate
     history: list[dict] = []
     # Each centralized round makes local_epochs passes through the full global
@@ -173,7 +173,7 @@ def main() -> None:
             frame, train_indices, config.image_size, config.batch_size,
             config.num_workers, True, config.seed + round_number,
             config.strong_augmentation, config.balanced_sampling,
-            config.cache_resized_images, config.use_metadata,
+            config.cache_resized_images, config.use_metadata, config.image_enhancement,
         )
         model.train()
         for _ in range(config.local_epochs):
@@ -191,7 +191,7 @@ def main() -> None:
                     metadata = None
                 images = images.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
-                images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
+                images, targets_a, targets_b, mix_lambda, metadata = mixup_cutmix(images, targets, config, metadata)
                 with torch.autocast(
                     device_type=device.type,
                     enabled=config.amp and device.type == "cuda",
@@ -256,8 +256,9 @@ def main() -> None:
                 f"time={metrics['epoch_seconds']:.1f}s "
                 f"step={metrics['milliseconds_per_step']:.0f}ms"
             )
-            if metrics["macro_f1"] > best_f1:
-                best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
+            score = metrics[config.checkpoint_metric]
+            if score > best_score:
+                best_score, stale, lr_stale = score, 0, 0
                 torch.save({
                     "model_state": ema.ema.state_dict(),
                     "class_names": class_names,
@@ -277,7 +278,7 @@ def main() -> None:
                         current_lr, lr_stale = updated_lr, 0
                         print(f"Reducing centralized learning rate to {current_lr:.2e} on next round")
                 if stale >= config.early_stopping_patience:
-                    print("Early stopping: validation macro-F1 did not improve.")
+                    print(f"Early stopping: validation {config.checkpoint_metric} did not improve.")
                     stop_training = True
             if stop_training:
                 break

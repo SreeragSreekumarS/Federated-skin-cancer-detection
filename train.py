@@ -91,7 +91,7 @@ def main():
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
-    best_f1, stale, lr_stale, current_lr, history = -1.0, 0, 0, config.learning_rate, []
+    best_score, stale, lr_stale, current_lr, history = -1.0, 0, 0, config.learning_rate, []
     for round_number in range(1, config.rounds + 1):
         rng = np.random.default_rng(config.seed + round_number)
         selected_count = max(1, math.ceil(config.clients * config.client_fraction))
@@ -109,8 +109,9 @@ def main():
         }
         history.append(metrics)
         print(f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, balanced accuracy={metrics['balanced_accuracy']:.4f}")
-        if metrics["macro_f1"] > best_f1:
-            best_f1, stale, lr_stale = metrics["macro_f1"], 0, 0
+        score = metrics[config.checkpoint_metric]
+        if score > best_score:
+            best_score, stale, lr_stale = score, 0, 0
             torch.save({"model_state": ema.ema.state_dict(), "class_names": class_names,
                         "model_name": config.model_name, "image_size": config.image_size,
                         "classifier_hidden_dim": config.classifier_hidden_dim,
@@ -127,7 +128,7 @@ def main():
                     lr_stale = 0
                     print(f"Reducing client learning rate to {current_lr:.2e}")
             if stale >= config.early_stopping_patience:
-                print("Early stopping: validation macro-F1 did not improve."); break
+                print(f"Early stopping: validation {config.checkpoint_metric} did not improve."); break
     checkpoint = torch.load(output / "best_model.pt", map_location=device, weights_only=False)
     ema.ema.load_state_dict(checkpoint["model_state"])
     validation_logits, validation_targets = predict_logits(ema.ema, frame, val_indices, config, device)

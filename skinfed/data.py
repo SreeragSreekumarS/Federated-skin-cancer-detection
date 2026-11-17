@@ -328,6 +328,7 @@ def transforms_for(
     training: bool,
     strong_augmentation: bool = False,
     already_resized: bool = False,
+    image_enhancement: bool = False,
 ):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     if training:
@@ -343,6 +344,14 @@ def transforms_for(
             augmentations.extend([
                 transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
                 transforms.RandomApply([transforms.RandomPerspective(distortion_scale=0.12)], p=0.10),
+            ])
+        # Small, randomized color/contrast corrections for training only.
+        # Validation and test keep the original image distribution.
+        if image_enhancement:
+            augmentations.extend([
+                transforms.RandomApply([transforms.RandomAutocontrast()], p=0.10),
+                transforms.RandomApply([transforms.RandomAdjustSharpness(1.25)], p=0.10),
+                transforms.RandomApply([transforms.RandomEqualize()], p=0.05),
             ])
         augmentations.extend([transforms.ToTensor(), normalize])
         if strong_augmentation:

@@ -14,6 +14,8 @@ class TrainConfig:
     model_name: str = "mobilenet_v3_large"
     use_metadata: bool = False
     decision_metric: str = "accuracy"
+    checkpoint_metric: str = "macro_f1"
+    class_weighting: str = "auto"
     preserve_melanoma_sensitivity: bool = True
     aggregation_weighting: str = "samples"
     min_groups_per_class_per_hospital: int = 3
@@ -56,6 +58,7 @@ class TrainConfig:
     tta_views: int = 8
     amp: bool = True
     strong_augmentation: bool = False
+    image_enhancement: bool = False
     balanced_sampling: bool = False
     cache_resized_images: bool = False
 
@@ -66,6 +69,10 @@ class TrainConfig:
             raise ValueError("tta_views must be one of 1, 2, 4, or 8")
         if self.decision_metric not in {"accuracy", "balanced_accuracy", "macro_f1"}:
             raise ValueError("decision_metric must be accuracy, balanced_accuracy, or macro_f1")
+        if self.checkpoint_metric not in {"accuracy", "macro_f1"}:
+            raise ValueError("checkpoint_metric must be accuracy or macro_f1")
+        if self.class_weighting not in {"auto", "inverse_frequency", "none"}:
+            raise ValueError("class_weighting must be auto, inverse_frequency, or none")
         if self.partition_mode not in {"global", "hospital_first"}:
             raise ValueError("partition_mode must be global or hospital_first")
         if self.aggregation_weighting not in {"samples", "quality"}:

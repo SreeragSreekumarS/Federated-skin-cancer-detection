@@ -16,7 +16,17 @@ class FocalCrossEntropy(nn.Module):
         super().__init__(); self.register_buffer("weights", weights); self.gamma = gamma; self.smoothing = label_smoothing
     def forward(self, logits, target):
         ce = nn.functional.cross_entropy(logits, target, weight=self.weights, reduction="none", label_smoothing=self.smoothing)
+        if self.gamma == 0:
+            return ce.mean()
         return ((1 - torch.exp(-ce)).pow(self.gamma) * ce).mean()
+
+
+def configured_loss_weights(class_weights: torch.Tensor, config) -> torch.Tensor:
+    if config.class_weighting == "none":
+        return torch.ones_like(class_weights)
+    if config.class_weighting == "inverse_frequency":
+        return class_weights
+    return torch.ones_like(class_weights) if config.balanced_sampling else class_weights
 
 
 def state_cpu(model: nn.Module) -> OrderedDict:
@@ -84,7 +94,7 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
 
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
-                balanced_sampling=False, cache_resized=False, use_metadata=False):
+                balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
@@ -97,26 +107,30 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
         )
     return DataLoader(LesionDataset(
         frame, indices,
-        transforms_for(image_size, training, strong_augmentation, already_resized=cache_resized),
+        transforms_for(image_size, training, strong_augmentation, already_resized=cache_resized,
+                       image_enhancement=image_enhancement),
         use_metadata=use_metadata,
     ), batch_size=batch_size,
                       shuffle=training and sampler is None, sampler=sampler,
                       num_workers=workers, pin_memory=True, persistent_workers=workers > 0, generator=generator)
 
 
-def mixup_cutmix(images: torch.Tensor, targets: torch.Tensor, config):
+def mixup_cutmix(images: torch.Tensor, targets: torch.Tensor, config, metadata=None):
     """Apply one batch-level MixUp or CutMix transform when selected."""
     available = [name for name, alpha in (
         ("mixup", config.mixup_alpha), ("cutmix", config.cutmix_alpha)
     ) if alpha > 0]
     if len(images) < 2 or not available or torch.rand(()) >= config.mixup_cutmix_probability:
-        return images, targets, None, 1.0
+        return images, targets, None, 1.0, metadata
     method = available[int(torch.randint(len(available), ()).item())]
     alpha = config.mixup_alpha if method == "mixup" else config.cutmix_alpha
     lam = float(np.random.beta(alpha, alpha))
     permutation = torch.randperm(len(images), device=images.device)
     if method == "mixup":
-        return images * lam + images[permutation] * (1 - lam), targets, targets[permutation], lam
+        mixed_metadata = metadata
+        if metadata is not None:
+            mixed_metadata = metadata * lam + metadata[permutation] * (1 - lam)
+        return images * lam + images[permutation] * (1 - lam), targets, targets[permutation], lam, mixed_metadata
 
     height, width = images.shape[-2:]
     cut_ratio = np.sqrt(1 - lam)
@@ -128,7 +142,10 @@ def mixup_cutmix(images: torch.Tensor, targets: torch.Tensor, config):
     mixed = images.clone()
     mixed[:, :, y1:y2, x1:x2] = images[permutation, :, y1:y2, x1:x2]
     lam = 1 - ((x2 - x1) * (y2 - y1) / (width * height))
-    return mixed, targets, targets[permutation], lam
+    mixed_metadata = metadata
+    if metadata is not None:
+        mixed_metadata = metadata * lam + metadata[permutation] * (1 - lam)
+    return mixed, targets, targets[permutation], lam, mixed_metadata
 
 
 def train_client(global_model, frame, indices, val_indices, config, device, class_weights, round_number, learning_rate=None):
@@ -143,7 +160,7 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.local_epochs))
     # Balanced sampling and inverse-frequency loss weights compound each other;
     # use neutral class weights when batches are rebalanced.
-    loss_weights = torch.ones_like(class_weights) if config.balanced_sampling else class_weights
+    loss_weights = configured_loss_weights(class_weights, config)
     criterion = FocalCrossEntropy(loss_weights.to(device), config.focal_gamma, config.label_smoothing)
     ema = ModelEMA(model, config.ema_decay)
     reference = {n: p.detach().clone() for n, p in model.named_parameters()} if config.fedprox_mu else {}
@@ -151,7 +168,7 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True,
                          config.seed + round_number, config.strong_augmentation, config.balanced_sampling,
-                         config.cache_resized_images, config.use_metadata)
+                         config.cache_resized_images, config.use_metadata, config.image_enhancement)
     model.train(); optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):
@@ -163,7 +180,7 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                 images, targets = batch
                 metadata = None
             images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
-            images, targets_a, targets_b, mix_lambda = mixup_cutmix(images, targets, config)
+            images, targets_a, targets_b, mix_lambda, metadata = mixup_cutmix(images, targets, config, metadata)
             with torch.autocast(device_type=device.type, enabled=config.amp and device.type == "cuda"):
                 logits = model(images, metadata) if config.use_metadata else model(images)
                 if not torch.isfinite(logits).all():
@@ -229,6 +246,7 @@ def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, n
         frame, indices, config.image_size, config.batch_size, config.num_workers,
         False, config.seed, cache_resized=config.cache_resized_images,
         use_metadata=config.use_metadata,
+        image_enhancement=False,
     )
     model.eval(); logits_all, targets = [], []
     view_count = config.tta_views if config.tta else 1
