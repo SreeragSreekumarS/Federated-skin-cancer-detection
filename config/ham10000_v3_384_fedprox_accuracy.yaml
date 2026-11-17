@@ -16,9 +16,9 @@ clients: 3
 dirichlet_alpha: 1.0
 rounds: 50
 client_fraction: 1.0
-local_epochs: 1
-batch_size: 16
-gradient_accumulation: 2
+local_epochs: 3
+batch_size: 32
+gradient_accumulation: 1
 num_workers: 2
 image_size: 384
 use_cbam: true

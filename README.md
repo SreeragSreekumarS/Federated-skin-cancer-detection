@@ -45,7 +45,7 @@ python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config
 
 The held-out test split remains untouched during training and checkpoint selection. This profile is aimed at improving top-line accuracy, so rare-class recall may decrease; no training recipe can guarantee 90% accuracy. Check `runs/ham10000_v3_384_accuracy/metrics.json` for final raw-argmax and selected test accuracy and class-level metrics.
 
-For a follow-up to a weak federated run, use `config/ham10000_v3_384_fedprox_accuracy.yaml`. It keeps `seed: 42`, `split_seed: 42`, the same hospital-first split settings, model, and image size; it tests stronger FedProx (`0.01`), one local epoch per round over 50 rounds, lower learning rates, and raw inputs without hair removal or extra contrast/sharpness transforms. Run it as a separate experiment:
+For a follow-up to a weak federated run, use `config/ham10000_v3_384_fedprox_accuracy.yaml`. It keeps `seed: 42`, `split_seed: 42`, the same hospital-first split settings, model, and image size; it uses the paper's 50 rounds, 3 local epochs per round, and batch size 32, while testing stronger FedProx (`0.01`), lower learning rates, and raw inputs without hair removal or extra contrast/sharpness transforms. Run it as a separate experiment:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_fedprox_accuracy.yaml
