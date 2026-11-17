@@ -45,6 +45,14 @@ python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config
 
 The held-out test split remains untouched during training and checkpoint selection. This profile is aimed at improving top-line accuracy, so rare-class recall may decrease; no training recipe can guarantee 90% accuracy. Check `runs/ham10000_v3_384_accuracy/metrics.json` for final raw-argmax and selected test accuracy and class-level metrics.
 
+For a follow-up to a weak federated run, use `config/ham10000_v3_384_fedprox_accuracy.yaml`. It keeps `seed: 42`, `split_seed: 42`, the same hospital-first split settings, model, and image size; it tests stronger FedProx (`0.01`), one local epoch per round over 50 rounds, lower learning rates, and raw inputs without hair removal or extra contrast/sharpness transforms. Run it as a separate experiment:
+
+```bash
+python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_fedprox_accuracy.yaml
+```
+
+Compare validation accuracy and then the final held-out test accuracy in `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`. This isolates a plausible federation-drift and preprocessing improvement; it does not guarantee 95% accuracy.
+
 Each completed training run also creates `runs/<name>/plots/` with client training accuracy/loss by federated round, global validation curves, combined and per-hospital held-out confusion-matrix heatmaps, per-class ROC AUC, ROC curves, and precision-recall curves. ROC and precision-recall curves are omitted for classes that do not have both positive and negative examples in the evaluated split. Client training curves are computed during local optimization; global curves use validation data, and final confusion matrices/ROC plots use held-out test data.
 
 Each patient/lesion group is assigned to one simulated hospital before that hospital's train, validation, and held-out test subsets are made. Even with `dirichlet_alpha: 1.0` on HAM10000, rare classes such as DF and VASC may have very few examples at some hospitals; use combined test metrics as the primary result and interpret rare-class per-hospital metrics cautiously. `hospital_metrics.json` reports test metrics for every hospital, the combined test metrics, mean/standard deviation across hospitals, and worst-hospital macro F1. `metrics.json` also records local validation metrics for each selected hospital in every training round.
