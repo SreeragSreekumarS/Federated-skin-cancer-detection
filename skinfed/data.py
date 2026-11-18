@@ -50,6 +50,21 @@ class RandomHairRemoval:
         return Image.fromarray(cv2.cvtColor(cleaned, cv2.COLOR_BGR2RGB))
 
 
+class GrayWorldColorConstancy:
+    """Normalize per-channel means using the Gray World assumption."""
+    def __call__(self, image: Image.Image) -> Image.Image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+        channel_means = rgb.mean(axis=(0, 1))
+        nonzero = channel_means > 1e-6
+        if not nonzero.any():
+            return image
+        target = float(channel_means[nonzero].mean())
+        gains = np.ones(3, dtype=np.float32)
+        gains[nonzero] = target / channel_means[nonzero]
+        corrected = np.clip(rgb * gains[None, None, :], 0, 255).astype(np.uint8)
+        return Image.fromarray(corrected, mode="RGB")
+
+
 def encode_metadata(frame: pd.DataFrame) -> np.ndarray:
     """Encode only age, sex, and anatomical site with fixed vocabularies."""
     missing = {"age", "sex", "site"} - set(frame.columns)
@@ -291,6 +306,75 @@ def make_federated_splits(
     return client_train, client_val, client_test, val_indices, test_indices
 
 
+def make_source_splits(
+    frame: pd.DataFrame, train: float, val: float, seed: int,
+    source_order: tuple[str, ...] = ("BCN", "MSK"),
+):
+    """Split natural ISIC source clients by lesion group, then split each client."""
+    if "source" not in frame:
+        raise ValueError("partition_mode=source requires a source column in the ISIC training manifest")
+    observed = set(frame.source.fillna("").astype(str))
+    if observed != set(source_order):
+        raise ValueError(
+            "partition_mode=source expects only BCN and MSK training data after HAM exclusion; "
+            f"found {sorted(observed)}"
+        )
+    if not 0 < train < 1 or not 0 < val < 1 or train + val >= 1:
+        raise ValueError("Train and validation fractions must be positive and leave a non-empty test split")
+
+    client_train: list[np.ndarray] = []
+    client_val: list[np.ndarray] = []
+    client_test: list[np.ndarray] = []
+    group_owners: dict[str, str] = {}
+    for client_index, source in enumerate(source_order):
+        indices = np.flatnonzero(frame.source.astype(str).to_numpy() == source)
+        if not len(indices):
+            raise ValueError(f"Natural source client {source} has no images")
+        subset = frame.iloc[indices].reset_index(drop=True)
+        local_train, local_val, local_test = _split_indices(subset, train, val, seed + client_index)
+        client_train.append(indices[local_train])
+        client_val.append(indices[local_val])
+        client_test.append(indices[local_test])
+        for group in subset.patient_id.astype(str).unique():
+            previous = group_owners.setdefault(group, source)
+            if previous != source:
+                raise RuntimeError(f"Lesion group {group!r} appears in multiple source clients")
+
+    all_parts = [part for client_parts in zip(client_train, client_val, client_test) for part in client_parts]
+    assigned = np.concatenate(all_parts)
+    if len(assigned) != len(frame) or len(np.unique(assigned)) != len(frame):
+        raise RuntimeError("Source partition did not assign every training image exactly once")
+
+    class_names = sorted(frame.label.astype(str).unique().tolist())
+    group_labels = frame.groupby(frame.patient_id.astype(str))["label"].agg(
+        lambda values: str(values.astype(str).value_counts().sort_index().idxmax())
+    )
+    rows = []
+    missing = []
+    for source_index, source in enumerate(source_order):
+        for split_name, indices in zip(
+            ("train", "validation", "test"),
+            (client_train[source_index], client_val[source_index], client_test[source_index]),
+        ):
+            groups = frame.iloc[indices].patient_id.astype(str).unique()
+            counts = group_labels.reindex(groups).value_counts()
+            values = {name: int(counts.get(name, 0)) for name in class_names}
+            rows.append({"source": source, "split": split_name, **values})
+            missing.extend(f"{source}/{split_name}/{name}" for name, count in values.items() if count == 0)
+    table = pd.DataFrame(rows).set_index(["source", "split"])
+    print("Natural source × split × class counts (lesion groups):")
+    print(table.to_string())
+    if missing:
+        warnings.warn(
+            "Some source splits have no lesion groups for a class: " + ", ".join(missing),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    val_indices = np.concatenate(client_val)
+    test_indices = np.concatenate(client_test)
+    return client_train, client_val, client_test, val_indices, test_indices
+
+
 class ResizeWithPad:
     """Resize the complete image to fit a square, padding without cropping or stretching."""
     def __init__(self, image_size: int):
@@ -353,11 +437,15 @@ def transforms_for(
     already_resized: bool = False,
     image_enhancement: bool = False,
     hair_removal_probability: float = 0.0,
+    color_constancy: bool = False,
 ):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    preprocessing = [] if already_resized else [ResizeWithPad(image_size)]
+    if color_constancy:
+        preprocessing.append(GrayWorldColorConstancy())
     if training:
         augmentations = [
-            *([] if already_resized else [ResizeWithPad(image_size)]),
+            *preprocessing,
             RandomHairRemoval(hair_removal_probability),
             transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
             transforms.RandomRotation(15, fill=(123, 116, 103)),
@@ -382,7 +470,6 @@ def transforms_for(
         if strong_augmentation:
             augmentations.append(transforms.RandomErasing(p=0.10, scale=(0.01, 0.04), ratio=(0.5, 2.0)))
         return transforms.Compose(augmentations)
-    preprocessing = [] if already_resized else [ResizeWithPad(image_size)]
     return transforms.Compose([*preprocessing, transforms.ToTensor(), normalize])
 
 

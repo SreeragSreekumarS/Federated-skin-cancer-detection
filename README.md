@@ -189,6 +189,32 @@ python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config
 
 `aggregation_weighting: samples` is plain FedAvg by client sample count. `quality` multiplies sample count by validation macro-F1 over classes present in that client's validation labels. Clients submit their EMA model state, matching the state used for quality evaluation.
 
+## ISIC 2019 → HAM10000 external evaluation
+
+This experiment trains on the non-HAM portion of ISIC 2019 and evaluates HAM10000 only after checkpoint and decision-rule selection are complete. The HAM test set must not be used to tune augmentation, thresholds, checkpoints, or hyperparameters. The ISIC training manifest must include metadata (`lesion_id`) so source institutions and lesion groups can be identified.
+
+Prepare both harmonized label variants and audit perceptual duplicates. In this data release, ISIC metadata uses `HAM_`, `BCN_`, and `MSK4_` lesion ID prefixes; missing lesion IDs are grouped as MSK images, with each missing-ID image treated as its own group. The builder confirms the source counts and removes exact HAM image-ID overlaps plus ISIC images within pHash Hamming distance 4 of a HAM image. Review `preparation_summary.json`, `isic_source_audit.csv`, and `cross_dataset_phash_duplicates.csv` before training:
+
+```bash
+python tools/prepare_isic2019_external_ham.py \
+  --isic-manifest data/ISIC2019/isic2019_metadata_manifest.csv \
+  --isic-metadata data/ISIC2019/ISIC_2019_Training_Metadata.csv \
+  --ham-metadata data/HAM10000/HAM10000_metadata.csv \
+  --ham-images data/HAM10000/images \
+  --output-dir data/ISIC2019_HAM_external
+```
+
+The `merged` manifest maps ISIC `AK` and `SCC` to `akiec`; `scc_excluded` drops SCC and maps AK to `akiec`. HAM remains the same seven classes in both views. For example, run the source-institution clients with color constancy, no metadata, 384px images, and the separate HAM external test:
+
+```bash
+python train.py \
+  --manifest data/ISIC2019_HAM_external/isic2019_train_merged.csv \
+  --external-test-manifest data/ISIC2019_HAM_external/ham10000_external_merged.csv \
+  --config config/isic2019_to_ham10000_source.yaml
+```
+
+Use `config/isic2019_to_ham10000_dirichlet.yaml` with the same manifests for the three-client simulated-partition comparison. To report the alternate label mapping, switch both manifest filenames from `_merged.csv` to `_scc_excluded.csv` and use a distinct run name/config copy so outputs remain separate. The internal ISIC train/validation/test partitions are lesion-grouped within each client; validation selects checkpoints and the decision rule, internal test reports the in-domain comparison, and external HAM metrics are written to `external_test_metrics.json` with confusion matrices and predictions alongside it. Reports include accuracy, balanced accuracy, macro-F1, and per-class sensitivity for raw argmax and the validation-selected rule. Exact image-ID overlap is checked again by the trainer. The standalone `tools/audit_cross_dataset_duplicates.py` can repeat the pHash audit for any two manifests.
+
 If the ISIC V4 reference run used `--no-amp`, add `--no-amp` to the corresponding sweeps for an apples-to-apples optimization recipe. Summarize a seed group with repeated `--run` arguments, for example:
 
 ```bash

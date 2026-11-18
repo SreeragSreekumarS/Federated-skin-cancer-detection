@@ -60,6 +60,7 @@ class TrainConfig:
     strong_augmentation: bool = False
     image_enhancement: bool = False
     hair_removal_probability: float = 0.0
+    color_constancy: bool = False
     balanced_sampling: bool = False
     cache_resized_images: bool = False
 
@@ -76,8 +77,8 @@ class TrainConfig:
             raise ValueError("class_weighting must be auto, inverse_frequency, or none")
         if not 0 <= self.hair_removal_probability <= 1:
             raise ValueError("hair_removal_probability must be in [0, 1]")
-        if self.partition_mode not in {"global", "hospital_first"}:
-            raise ValueError("partition_mode must be global or hospital_first")
+        if self.partition_mode not in {"global", "hospital_first", "source"}:
+            raise ValueError("partition_mode must be global, hospital_first, or source")
         if self.aggregation_weighting not in {"samples", "quality"}:
             raise ValueError("aggregation_weighting must be samples or quality")
         if self.min_groups_per_class_per_hospital < 1:

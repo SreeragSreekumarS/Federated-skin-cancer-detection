@@ -66,10 +66,24 @@ def main() -> None:
         )
         labels = labels.merge(metadata, on="image", how="left", validate="one_to_one")
         if "lesion_id" in labels:
-            labels["patient_id"] = labels["lesion_id"].fillna(labels["image"]).astype(str)
+            lesion = labels["lesion_id"].fillna("").astype(str).str.strip()
+            prefix = lesion.str.split("_").str[0]
+            # Verified ISIC 2019 metadata contains HAM_, BCN_, and MSK4_ lesion
+            # identifiers. Missing lesion IDs also belong to MSK in this release.
+            source_map = {"HAM": "HAM", "BCN": "BCN", "MSK4": "MSK"}
+            unknown = sorted(set(prefix[lesion.ne("")].unique()) - set(source_map))
+            if unknown:
+                raise ValueError(f"Unrecognized ISIC lesion_id prefixes: {unknown}")
+            labels["source"] = prefix.map(source_map).where(lesion.ne(""), "MSK")
+            labels["lesion_id"] = lesion
+            labels["patient_id"] = lesion.where(lesion.ne(""), labels["image"]).astype(str)
         else:
+            labels["lesion_id"] = ""
+            labels["source"] = "unknown"
             labels["patient_id"] = labels["image"]
     else:
+        labels["lesion_id"] = ""
+        labels["source"] = "unknown"
         labels["patient_id"] = labels["image"]
 
     # Keep only approved metadata fields; diagnosis methodology is never used.
@@ -80,7 +94,10 @@ def main() -> None:
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    labels[["image_path", "label", "patient_id", "age", "sex", "site"]].to_csv(output, index=False)
+    labels["image_id"] = labels["image"].astype(str)
+    labels[["image_path", "label", "patient_id", "image_id", "lesion_id", "source", "age", "sex", "site"]].to_csv(output, index=False)
+    print("Source counts:")
+    print(labels.source.value_counts().sort_index().to_string())
     print(f"Wrote {len(labels)} rows across {labels['label'].nunique()} classes to {output}")
 
 

@@ -5,6 +5,7 @@ numpy>=1.26
 pandas>=2.1
 Pillow>=10.0
 scikit-learn>=1.4
+scipy>=1.10
 matplotlib>=3.8
 tqdm>=4.66
 PyYAML>=6.0

@@ -24,8 +24,11 @@ def main():
     meta["age"] = pd.to_numeric(meta["age"], errors="coerce")
     meta["sex"] = meta["sex"].fillna("unknown")
     meta["site"] = meta["localization"].fillna("unknown")
+    meta["image_id"] = meta["image_id"].astype(str)
+    meta["lesion_id"] = meta["lesion_id"].fillna("").astype(str)
+    meta["source"] = "HAM"
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    meta[["image_path", "label", "patient_id", "age", "sex", "site"]].to_csv(output, index=False)
+    meta[["image_path", "label", "patient_id", "image_id", "lesion_id", "source", "age", "sex", "site"]].to_csv(output, index=False)
     print(f"Wrote {len(meta)} rows to {output}")
 
 

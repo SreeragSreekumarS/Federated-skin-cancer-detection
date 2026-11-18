@@ -5,7 +5,10 @@ import numpy as np
 import pandas as pd
 import torch
 from skinfed.config import load_config, save_config
-from skinfed.data import METADATA_FEATURE_DIM, cache_resized_images, encode_metadata, make_federated_splits, read_manifest
+from skinfed.data import (
+    METADATA_FEATURE_DIM, cache_resized_images, encode_metadata,
+    make_federated_splits, make_source_splits, read_manifest,
+)
 from skinfed.federated import ModelEMA, aggregate, evaluate, predict_logits, train_client
 from skinfed.calibration import apply_decision_rule, select_decision_rule
 from skinfed.metrics import classification_metrics
@@ -21,6 +24,7 @@ def seed_everything(seed: int):
 def main():
     parser = argparse.ArgumentParser(description="Memory-efficient federated skin-lesion training")
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--external-test-manifest", help="Optional untouched external test set evaluated after model selection")
     parser.add_argument("--config", default="config/gtx1650.yaml")
     parser.add_argument("--output", default="runs")
     parser.add_argument("--no-pretrained", action="store_true", help="Do not download/use ImageNet weights (only for offline smoke tests)")
@@ -39,22 +43,36 @@ def main():
     if args.no_amp: config.amp = False
     if args.aggregation_weighting: config.aggregation_weighting = args.aggregation_weighting
     config.validate(); seed_everything(config.seed)
-    config.partition_mode = "hospital_first"
+    if config.partition_mode == "global":
+        # Preserve the project's established lesion-first hospital partition
+        # when older configs omit an explicit federated partition mode.
+        config.partition_mode = "hospital_first"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
     print(f"Federated aggregation weighting: {config.aggregation_weighting}")
     frame, class_names = read_manifest(args.manifest)
+    if args.external_test_manifest and config.use_metadata:
+        raise ValueError("External ISIC-to-HAM evaluation requires use_metadata: false because metadata vocabularies differ")
     if config.use_metadata:
         encode_metadata(frame)
     if config.cache_resized_images:
         cache_dir = Path(args.manifest).resolve().parent / f".resized_cache_{config.image_size}"
         print(f"Preparing resized-image cache at {cache_dir}")
         frame = cache_resized_images(frame, config.image_size, cache_dir)
-    client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_federated_splits(
-        frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction,
-        config.split_seed, config.min_groups_per_class_per_hospital,
-    )
+    if config.partition_mode == "source":
+        if config.clients != 2:
+            raise ValueError("partition_mode=source requires clients: 2 (BCN and MSK)")
+        client_names = ["BCN", "MSK"]
+        client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_source_splits(
+            frame, config.train_fraction, config.val_fraction, config.split_seed,
+        )
+    else:
+        client_names = [f"hospital_{i + 1}" for i in range(config.clients)]
+        client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_federated_splits(
+            frame, config.clients, config.dirichlet_alpha, config.train_fraction, config.val_fraction,
+            config.split_seed, config.min_groups_per_class_per_hospital,
+        )
     output = Path(args.output) / config.run_name; output.mkdir(parents=True, exist_ok=True)
     save_config(config, output / "config.yaml")
     (output / "class_names.json").write_text(json.dumps(class_names, indent=2), encoding="utf-8")
@@ -71,17 +89,20 @@ def main():
                     "label": row.label,
                     "patient_id": row.patient_id,
                     "hospital_id": hospital,
+                    "client_id": client_names[hospital - 1],
+                    "source": getattr(row, "source", ""),
                     "split": split_name,
                 })
     pd.DataFrame(assignments).sort_values("manifest_index").to_csv(
         output / "split_assignments.csv", index=False
     )
     distributions = {}
+    client_prefix = "client" if config.partition_mode == "source" else "hospital"
     for split_name, split_indices in (("train", client_indices), ("validation", client_val_indices), ("test", client_test_indices)):
         distributions[split_name] = pd.DataFrame(
-            {f"hospital_{i + 1}": frame.iloc[idx].label.value_counts() for i, idx in enumerate(split_indices)}
+            {client_names[i]: frame.iloc[idx].label.value_counts() for i, idx in enumerate(split_indices)}
         ).fillna(0).astype(int)
-        distributions[split_name].to_csv(output / f"hospital_{split_name}_class_distribution.csv")
+        distributions[split_name].to_csv(output / f"{client_prefix}_{split_name}_class_distribution.csv")
     counts = frame.iloc[np.concatenate(client_indices)].target.value_counts().reindex(range(len(class_names)), fill_value=1).to_numpy()
     weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32)
     model = build_model(len(class_names), pretrained=not args.no_pretrained, use_cbam=config.use_cbam,
@@ -103,9 +124,10 @@ def main():
         aggregate(model, updates, config.aggregation_weighting)
         ema.update(model)
         metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
-        metrics["round"] = round_number; metrics["learning_rate"] = current_lr; metrics["selected_hospitals"] = [int(x) + 1 for x in selected]
+        metrics["round"] = round_number; metrics["learning_rate"] = current_lr
+        metrics["selected_clients"] = [client_names[int(x)] for x in selected]
         metrics["local_validation"] = {
-            f"hospital_{int(client) + 1}": update[3] for client, update in zip(selected, updates)
+            client_names[int(client)]: update[3] for client, update in zip(selected, updates)
         }
         history.append(metrics)
         print(f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, balanced accuracy={metrics['balanced_accuracy']:.4f}")
@@ -150,13 +172,15 @@ def main():
     test_metrics, matrix = classification_metrics(
         test_targets, test_probabilities, class_names, selected_test_predictions
     )
-    (output / "metrics.json").write_text(json.dumps({
+    metrics_report = {
         "validation_history": history,
         "decision_selection": decision,
         "raw_argmax": raw_test_metrics,
         "selected": test_metrics,
         "test": test_metrics,
-    }, indent=2), encoding="utf-8")
+        "client_names": client_names,
+        "partition_mode": config.partition_mode,
+    }
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
     pd.DataFrame(raw_matrix, index=class_names, columns=class_names).to_csv(
         output / "confusion_matrix_raw_argmax.csv"
@@ -171,7 +195,8 @@ def main():
         "combined_probabilities": test_probabilities,
         "combined_selected_predictions": selected_test_predictions,
     }
-    hospital_dir = output / "hospital_metrics"; hospital_dir.mkdir(exist_ok=True)
+    hospital_dir = output / ("client_metrics" if config.partition_mode == "source" else "hospital_metrics")
+    hospital_dir.mkdir(exist_ok=True)
     for hospital, indices in enumerate(client_test_indices, 1):
         hospital_logits, hospital_targets = predict_logits(ema.ema, frame, indices, config, device)
         hospital_raw_probabilities = torch.softmax(torch.from_numpy(hospital_logits), dim=1).numpy()
@@ -185,18 +210,20 @@ def main():
         metrics, hospital_matrix = classification_metrics(
             hospital_targets, hospital_probabilities, class_names, hospital_predictions
         )
-        hospital_test_metrics[f"hospital_{hospital}"] = {
+        metric_key = f"source_{client_names[hospital - 1]}" if config.partition_mode == "source" else f"hospital_{hospital}"
+        hospital_test_metrics[metric_key] = {
             "raw_argmax": hospital_raw_metrics,
             "selected": metrics,
         }
         hospital_matrices[f"hospital_{hospital}"] = hospital_matrix
-        prediction_payload[f"hospital_{hospital}_targets"] = hospital_targets
-        prediction_payload[f"hospital_{hospital}_raw_probabilities"] = hospital_raw_probabilities
-        prediction_payload[f"hospital_{hospital}_raw_predictions"] = hospital_raw_predictions
-        prediction_payload[f"hospital_{hospital}_probabilities"] = hospital_probabilities
-        prediction_payload[f"hospital_{hospital}_selected_predictions"] = hospital_predictions
+        prediction_key = f"source_{client_names[hospital - 1]}" if config.partition_mode == "source" else f"hospital_{hospital}"
+        prediction_payload[f"{prediction_key}_targets"] = hospital_targets
+        prediction_payload[f"{prediction_key}_raw_probabilities"] = hospital_raw_probabilities
+        prediction_payload[f"{prediction_key}_raw_predictions"] = hospital_raw_predictions
+        prediction_payload[f"{prediction_key}_probabilities"] = hospital_probabilities
+        prediction_payload[f"{prediction_key}_selected_predictions"] = hospital_predictions
         pd.DataFrame(hospital_matrix, index=class_names, columns=class_names).to_csv(
-            hospital_dir / f"hospital_{hospital}_confusion_matrix.csv"
+            hospital_dir / f"{prediction_key}_confusion_matrix.csv"
         )
     np.savez_compressed(output / "test_predictions.npz", **prediction_payload)
     save_result_plots(history, test_metrics, matrix, class_names, test_targets, test_probabilities,
@@ -205,6 +232,8 @@ def main():
     balanced_accuracy = np.array([metrics["selected"]["balanced_accuracy"] for metrics in hospital_test_metrics.values()])
     hospital_report = {
         "final_federated_model_by_hospital": hospital_test_metrics,
+        "client_names": client_names,
+        "partition_mode": config.partition_mode,
         "combined_raw_argmax": raw_test_metrics,
         "combined_selected": test_metrics,
         "combined_test": test_metrics,
@@ -214,6 +243,65 @@ def main():
         },
     }
     (output / "hospital_metrics.json").write_text(json.dumps(hospital_report, indent=2), encoding="utf-8")
+
+    if args.external_test_manifest:
+        external_frame, external_classes = read_manifest(args.external_test_manifest)
+        if "image_id" in frame and "image_id" in external_frame:
+            overlap = set(frame.image_id.astype(str)) & set(external_frame.image_id.astype(str))
+            if overlap:
+                examples = sorted(overlap)[:5]
+                raise ValueError(
+                    f"External test manifest shares {len(overlap)} exact image IDs with training; examples: {examples}"
+                )
+        if external_classes != class_names:
+            raise ValueError(
+                "External-test classes do not match the training class order. "
+                f"Training={class_names}; external={external_classes}. Check the class harmonization manifest."
+            )
+        if config.cache_resized_images:
+            external_cache = Path(args.external_test_manifest).resolve().parent / f".resized_cache_{config.image_size}_external"
+            print(f"Preparing external-test resized cache at {external_cache}")
+            external_frame = cache_resized_images(external_frame, config.image_size, external_cache)
+        external_indices = np.arange(len(external_frame))
+        external_logits, external_targets = predict_logits(
+            ema.ema, external_frame, external_indices, config, device
+        )
+        external_raw_probabilities = torch.softmax(torch.from_numpy(external_logits), dim=1).numpy()
+        external_raw_predictions = external_logits.argmax(axis=1)
+        external_raw_metrics, external_raw_matrix = classification_metrics(
+            external_targets, external_raw_probabilities, class_names, external_raw_predictions
+        )
+        external_probabilities, external_predictions = apply_decision_rule(
+            external_logits, decision, class_names
+        )
+        external_metrics, external_matrix = classification_metrics(
+            external_targets, external_probabilities, class_names, external_predictions
+        )
+        external_report = {
+            "manifest": str(Path(args.external_test_manifest).resolve()),
+            "images": int(len(external_frame)),
+            "decision_rule_from_internal_validation": decision["rule"],
+            "raw_argmax": external_raw_metrics,
+            "selected": external_metrics,
+        }
+        pd.DataFrame(external_matrix, index=class_names, columns=class_names).to_csv(
+            output / "external_test_confusion_matrix.csv"
+        )
+        pd.DataFrame(external_raw_matrix, index=class_names, columns=class_names).to_csv(
+            output / "external_test_confusion_matrix_raw_argmax.csv"
+        )
+        np.savez_compressed(
+            output / "external_test_predictions.npz",
+            class_names=np.asarray(class_names), targets=external_targets,
+            raw_probabilities=external_raw_probabilities, raw_predictions=external_raw_predictions,
+            probabilities=external_probabilities, predictions=external_predictions,
+        )
+        metrics_report["external_test"] = external_report
+        (output / "external_test_metrics.json").write_text(json.dumps(external_report, indent=2), encoding="utf-8")
+        print("External HAM10000 test metrics:")
+        print(json.dumps(external_metrics, indent=2))
+
+    (output / "metrics.json").write_text(json.dumps(metrics_report, indent=2), encoding="utf-8")
     print(f"Plots saved to: {output / 'plots'}")
     print(json.dumps(test_metrics, indent=2))
 
