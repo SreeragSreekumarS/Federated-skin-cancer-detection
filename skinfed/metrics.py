@@ -49,13 +49,14 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
             "true_positives": int(tp), "true_negatives": int(tn),
             "false_positives": int(fp), "false_negatives": int(fn), "support": int(support[i]),
         }
-    if np.unique(y_true).size < 2:
-        auc = None
-    else:
-        try:
-            auc = roc_auc_score(y_true, probabilities, labels=labels, multi_class="ovr", average="macro")
-        except ValueError:  # A held-out split without every class cannot define multiclass AUC.
-            auc = None
+    # Average only defined one-vs-rest AUCs. Calling sklearn's multiclass
+    # scorer with the full label set warns when a small client split omits a
+    # class, even though those unsupported classes cannot contribute an AUC.
+    valid_aucs = [
+        item["roc_auc_ovr"] for item in per_class.values()
+        if item["roc_auc_ovr"] is not None
+    ]
+    auc = float(np.mean(valid_aucs)) if valid_aucs else None
     valid_average_precisions = [
         item["average_precision"] for item in per_class.values()
         if item["average_precision"] is not None
