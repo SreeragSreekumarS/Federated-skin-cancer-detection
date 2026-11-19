@@ -65,7 +65,7 @@ Run the centralized comparison with the same manifest and config as the federate
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_manifest.csv --config config/ham10000_gpu.yaml
 ```
 
-Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. Final paired profiles keep `split_seed: 42` while varying the training seed. Validation selects among raw argmax, smoothed per-class thresholds, and prior logit adjustment using accuracy; thresholds or adjustment are used only when they improve validation accuracy, and both are disallowed if melanoma sensitivity falls below raw argmax. Test reports always include raw argmax and selected-rule metrics.
+Centralized runs also accept `--seed`, `--run-name`, `--image-size`, and `--model-name`. During training, a live batch progress line shows running loss, accuracy, elapsed time, and milliseconds per step; after each epoch it prints validation loss and accuracy. Final paired profiles keep `split_seed: 42` while varying the training seed. Validation selects among raw argmax, smoothed per-class thresholds, and prior logit adjustment using `decision_metric`, subject to `decision_accuracy_loss_cap` versus raw argmax validation accuracy. Candidate rules are also disallowed if melanoma sensitivity falls below raw argmax. Test reports always include raw argmax and selected-rule metrics.
 
 If training reports non-finite logits or loss, retry with `--no-amp`; if it persists, lower `learning_rate` and `backbone_learning_rate` in a separate config. Use a new run name for the retry. A failed run has not produced final held-out test metrics.
 
@@ -258,11 +258,11 @@ The segmented configs use the same 288 px input size as the full-image configs. 
 
 ## MobileNetV3 multi-scale feature head
 
-The optional `multiscale_head` keeps the pretrained MobileNetV3-Large backbone and combines pooled outputs from three feature stages (40, 112, and 960 channels) before the classifier. This gives the classifier earlier fine-texture features as well as later semantic features; the existing CBAM remains on the final feature map. The new HAM profile changes only the classifier input relative to `ham10000_v3_384_fedprox_accuracy.yaml`, so it uses the same lesion-group split and training recipe:
+The optional `multiscale_head` keeps the pretrained MobileNetV3-Large backbone and combines pooled outputs from three feature stages (40, 112, and 960 channels) before the classifier. This gives the classifier earlier fine-texture features as well as later semantic features; the existing CBAM remains on the final feature map. The HAM profile keeps the 384px, 50-round, 3-epoch, batch-32, FedProx 0.01 training setup and lesion-group split. It also enables client-local inverse-frequency sampling, mild client-specific log-prior adjustment (`0.1`), and validation selection by balanced accuracy with at most a 1 percentage-point accuracy loss versus raw argmax:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml --run-name ham10000_v3_384_multiscale_centralized
 ```
 
-Compare `runs/ham10000_v3_384_multiscale/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. Check validation metrics before test metrics; this architectural change is an experiment and does not guarantee a higher accuracy. Existing configs leave `multiscale_head: false`, preserving their previous classifier design.
+Compare `runs/ham10000_v3_384_multiscale_balanced/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. This run changes the feature head and rare-class recipe together, so the comparison measures their combined effect. The decision-rule cap is measured on validation only; raw and selected test metrics are both reported. Class-balanced sampling cannot create examples for a class absent from a client's training partition. Existing configs leave `multiscale_head: false` and client logit adjustment off.

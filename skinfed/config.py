@@ -14,6 +14,7 @@ class TrainConfig:
     model_name: str = "mobilenet_v3_large"
     use_metadata: bool = False
     decision_metric: str = "accuracy"
+    decision_accuracy_loss_cap: float = 0.01
     checkpoint_metric: str = "macro_f1"
     class_weighting: str = "auto"
     preserve_melanoma_sensitivity: bool = True
@@ -64,6 +65,8 @@ class TrainConfig:
     hair_removal_probability: float = 0.0
     color_constancy: bool = False
     balanced_sampling: bool = False
+    balanced_sampling_power: float = 0.5
+    client_logit_adjustment_strength: float = 0.0
     cache_resized_images: bool = False
 
     def validate(self) -> None:
@@ -73,6 +76,8 @@ class TrainConfig:
             raise ValueError("tta_views must be one of 1, 2, 4, or 8")
         if self.decision_metric not in {"accuracy", "balanced_accuracy", "macro_f1"}:
             raise ValueError("decision_metric must be accuracy, balanced_accuracy, or macro_f1")
+        if not 0 <= self.decision_accuracy_loss_cap <= 1:
+            raise ValueError("decision_accuracy_loss_cap must be between 0 and 1")
         if self.checkpoint_metric not in {"accuracy", "macro_f1"}:
             raise ValueError("checkpoint_metric must be accuracy or macro_f1")
         if self.class_weighting not in {"auto", "inverse_frequency", "none"}:
@@ -85,6 +90,10 @@ class TrainConfig:
             raise ValueError("aggregation_weighting must be samples or quality")
         if self.min_groups_per_class_per_hospital < 1:
             raise ValueError("min_groups_per_class_per_hospital must be at least 1")
+        if self.client_logit_adjustment_strength < 0:
+            raise ValueError("client_logit_adjustment_strength must be non-negative")
+        if not 0 < self.balanced_sampling_power <= 1:
+            raise ValueError("balanced_sampling_power must be in (0, 1]")
         if self.dirichlet_alpha <= 0 or not 0 < self.client_fraction <= 1:
             raise ValueError("dirichlet_alpha must be positive and client_fraction must be in (0, 1]")
         if self.classifier_hidden_dim < 1 or not 0 <= self.classifier_dropout < 1:

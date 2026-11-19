@@ -101,7 +101,7 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
     if training and balanced_sampling:
         targets = frame.iloc[indices].target.to_numpy()
         counts = np.bincount(targets, minlength=int(frame.target.max()) + 1)
-        sample_weights = 1.0 / np.sqrt(np.maximum(counts[targets], 1))
+        sample_weights = 1.0 / np.maximum(counts[targets], 1) ** config.balanced_sampling_power
         sampler = WeightedRandomSampler(
             torch.as_tensor(sample_weights, dtype=torch.double),
             num_samples=len(indices), replacement=True, generator=generator,
@@ -165,6 +165,17 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     # use neutral class weights when batches are rebalanced.
     loss_weights = configured_loss_weights(class_weights, config)
     criterion = FocalCrossEntropy(loss_weights.to(device), config.focal_gamma, config.label_smoothing)
+    local_counts = np.bincount(
+        frame.iloc[indices].target.to_numpy(), minlength=len(class_weights)
+    ).astype(np.float64)
+    logit_adjustment = None
+    if config.client_logit_adjustment_strength > 0:
+        # Laplace smoothing handles classes absent at a client. The adjustment
+        # is used only in that client's training loss, not during evaluation.
+        local_prior = (local_counts + 1.0) / (local_counts.sum() + len(local_counts))
+        logit_adjustment = config.client_logit_adjustment_strength * torch.log(
+            torch.as_tensor(local_prior, dtype=torch.float32, device=device)
+        )
     ema = ModelEMA(model, config.ema_decay)
     reference = {n: p.detach().clone() for n, p in model.named_parameters()} if config.fedprox_mu else {}
     # The scaler is disabled automatically when local training runs on CPU.
@@ -189,9 +200,10 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                 logits = model(images, metadata) if config.use_metadata else model(images)
                 if not torch.isfinite(logits).all():
                     raise FloatingPointError("Federated training produced non-finite logits; retry with --no-amp and lower learning rates.")
-                task_loss = criterion(logits, targets_a)
+                loss_logits = logits if logit_adjustment is None else logits + logit_adjustment
+                task_loss = criterion(loss_logits, targets_a)
                 if targets_b is not None:
-                    task_loss = mix_lambda * task_loss + (1 - mix_lambda) * criterion(logits, targets_b)
+                    task_loss = mix_lambda * task_loss + (1 - mix_lambda) * criterion(loss_logits, targets_b)
                 loss = task_loss
                 if reference:
                     prox = sum((p - reference[n]).pow(2).sum() for n, p in model.named_parameters())

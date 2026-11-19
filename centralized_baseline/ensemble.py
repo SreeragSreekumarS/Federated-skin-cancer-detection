@@ -97,6 +97,7 @@ def main() -> None:
         mean_val_logits, val_targets, class_names, train_counts,
         metric=configs[0].decision_metric,
         preserve_melanoma_sensitivity=configs[0].preserve_melanoma_sensitivity,
+        accuracy_loss_cap=configs[0].decision_accuracy_loss_cap,
     )
     raw_probabilities = torch.softmax(torch.from_numpy(mean_test_logits), dim=1).numpy()
     raw_predictions = mean_test_logits.argmax(axis=1)

@@ -51,6 +51,16 @@ def main():
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
     print(f"Federated aggregation weighting: {config.aggregation_weighting}")
+    print(
+        "Client-local class balancing: "
+        f"{'on (power=' + str(config.balanced_sampling_power) + ')' if config.balanced_sampling else 'off'}"
+    )
+    print(f"Per-client logit adjustment strength: {config.client_logit_adjustment_strength}")
+    print(
+        "Validation decision rule: "
+        f"maximize {config.decision_metric} with accuracy-loss cap "
+        f"{100 * config.decision_accuracy_loss_cap:.1f} percentage point(s)"
+    )
     frame, class_names = read_manifest(args.manifest)
     if args.external_test_manifest and config.use_metadata:
         raise ValueError("External ISIC-to-HAM evaluation requires use_metadata: false because metadata vocabularies differ")
@@ -165,6 +175,7 @@ def main():
         validation_logits, validation_targets, class_names, train_counts,
         metric=config.decision_metric,
         preserve_melanoma_sensitivity=config.preserve_melanoma_sensitivity,
+        accuracy_loss_cap=config.decision_accuracy_loss_cap,
     )
     test_logits, test_targets = predict_logits(ema.ema, frame, test_indices, config, device)
     raw_test_probabilities = torch.softmax(torch.from_numpy(test_logits), dim=1).numpy()

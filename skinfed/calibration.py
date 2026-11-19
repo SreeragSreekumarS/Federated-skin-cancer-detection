@@ -77,8 +77,11 @@ def select_decision_rule(
     train_counts: np.ndarray,
     metric: str = "accuracy",
     preserve_melanoma_sensitivity: bool = True,
+    accuracy_loss_cap: float = 0.01,
 ) -> dict:
-    """Select among raw argmax, validation-F1 thresholds, and prior logit adjustment."""
+    """Select a validation decision rule under an accuracy-loss constraint."""
+    if not 0 <= accuracy_loss_cap <= 1:
+        raise ValueError("accuracy_loss_cap must be between 0 and 1")
     temperature = fit_temperature(validation_logits, validation_targets)
     val_probs = torch.softmax(torch.as_tensor(validation_logits) / temperature, dim=1).numpy()
     thresholds = fit_class_thresholds(val_probs, validation_targets, class_names)
@@ -97,7 +100,13 @@ def select_decision_rule(
     for candidate in candidates:
         values = _metric_values(validation_targets, candidate["predictions"], class_names)
         candidate["validation_metrics"] = values
-        if candidate["rule"] != "argmax" and preserve_melanoma_sensitivity:
+        candidate["accuracy_loss_vs_argmax"] = raw_metrics["accuracy"] - values["accuracy"]
+        if candidate["accuracy_loss_vs_argmax"] > accuracy_loss_cap + 1e-12:
+            candidate["ineligible"] = (
+                f"accuracy loss {candidate['accuracy_loss_vs_argmax']:.4f} exceeds cap "
+                f"{accuracy_loss_cap:.4f}"
+            )
+        if not candidate.get("ineligible") and candidate["rule"] != "argmax" and preserve_melanoma_sensitivity:
             raw_recall = raw_metrics.get("melanoma_sensitivity")
             candidate_recall = values.get("melanoma_sensitivity")
             if raw_recall is not None and candidate_recall is not None and candidate_recall < raw_recall:
@@ -117,7 +126,10 @@ def select_decision_rule(
         "class_thresholds": thresholds,
         "class_priors": priors.tolist(),
         "selection_metric": metric,
+        "accuracy_loss_cap": accuracy_loss_cap,
+        "accuracy_reference": "raw_argmax_validation",
         "preserve_melanoma_sensitivity": preserve_melanoma_sensitivity,
+        "raw_argmax_validation_metrics": raw_metrics,
         "selected_validation_metrics": selected["validation_metrics"],
         "candidate_validation_metrics": [
             {key: value for key, value in candidate.items() if key != "predictions"}

@@ -300,6 +300,7 @@ def main() -> None:
         validation_logits, validation_targets, class_names, train_counts,
         metric=config.decision_metric,
         preserve_melanoma_sensitivity=config.preserve_melanoma_sensitivity,
+        accuracy_loss_cap=config.decision_accuracy_loss_cap,
     )
     test_logits, targets = predict_logits(ema.ema, frame, test_indices, config, device)
     raw_probabilities = torch.softmax(torch.from_numpy(test_logits), dim=1).numpy()
