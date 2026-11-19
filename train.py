@@ -108,7 +108,9 @@ def main():
     model = build_model(len(class_names), pretrained=not args.no_pretrained, use_cbam=config.use_cbam,
                         classifier_hidden_dim=config.classifier_hidden_dim, classifier_dropout=config.classifier_dropout,
                         drop_path_rate=config.drop_path_rate, model_name=config.model_name,
-                        metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0).to(device)
+                        metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0,
+                        multiscale_head=config.multiscale_head,
+                        multiscale_feature_dim=config.multiscale_feature_dim).to(device)
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
@@ -139,7 +141,9 @@ def main():
                         "classifier_hidden_dim": config.classifier_hidden_dim,
                         "classifier_dropout": config.classifier_dropout,
                         "drop_path_rate": config.drop_path_rate,
-                        "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0}, output / "best_model.pt")
+                        "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0,
+                        "multiscale_head": config.multiscale_head,
+                        "multiscale_feature_dim": config.multiscale_feature_dim}, output / "best_model.pt")
         else:
             stale += 1
             lr_stale += 1

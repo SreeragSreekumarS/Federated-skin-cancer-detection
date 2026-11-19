@@ -34,7 +34,14 @@ class CBAM(nn.Module):
 
 
 class AttentionMobileNetV3(nn.Module):
-    def __init__(self, base: nn.Module, num_classes: int, use_cbam: bool, classifier_hidden_dim: int, classifier_dropout: float, metadata_dim: int = 0) -> None:
+    # MobileNetV3-Large outputs these channel widths at progressively later
+    # stages: 40 (index 6), 112 (index 12), and 960 (index 16).
+    MULTISCALE_STAGES = {6: 40, 12: 112, 16: 960}
+
+    def __init__(self, base: nn.Module, num_classes: int, use_cbam: bool,
+                 classifier_hidden_dim: int, classifier_dropout: float,
+                 metadata_dim: int = 0, multiscale_head: bool = False,
+                 multiscale_feature_dim: int = 128) -> None:
         super().__init__()
         self.features = base.features
         self.attention = CBAM(960) if use_cbam else nn.Identity()
@@ -45,13 +52,29 @@ class AttentionMobileNetV3(nn.Module):
         # ImageNet classifier later expands these to 1280 channels, so using the
         # last classifier layer's input size here would not match `features`.
         feature_dim = base.classifier[0].in_features
+        self.multiscale_head = multiscale_head
+        self.multiscale_feature_dim = multiscale_feature_dim
+        if multiscale_head:
+            self.multiscale_pool = nn.AdaptiveAvgPool2d(1)
+            self.multiscale_projections = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(channels, multiscale_feature_dim),
+                    nn.LayerNorm(multiscale_feature_dim),
+                    nn.Hardswish(),
+                    nn.Dropout(classifier_dropout / 2),
+                )
+                for channels in self.MULTISCALE_STAGES.values()
+            ])
+            classifier_input_dim = multiscale_feature_dim * len(self.MULTISCALE_STAGES)
+        else:
+            classifier_input_dim = feature_dim
         self.metadata_dim = metadata_dim
         self.metadata_encoder = (
             nn.Sequential(nn.Linear(metadata_dim, 64), nn.LayerNorm(64), nn.Hardswish())
             if metadata_dim else None
         )
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim + (64 if metadata_dim else 0), classifier_hidden_dim),
+            nn.Linear(classifier_input_dim + (64 if metadata_dim else 0), classifier_hidden_dim),
             # LayerNorm remains valid for a final short client batch, unlike
             # BatchNorm1d which can fail when a simulated hospital has one sample.
             nn.LayerNorm(classifier_hidden_dim), nn.Hardswish(), nn.Dropout(classifier_dropout),
@@ -59,8 +82,25 @@ class AttentionMobileNetV3(nn.Module):
         )
 
     def forward(self, images: torch.Tensor, metadata: torch.Tensor | None = None) -> torch.Tensor:
-        features = self.attention(self.features(images))
-        features = torch.flatten(self.avgpool(features), 1)
+        if self.multiscale_head:
+            stage_features = {}
+            features = images
+            for index, layer in enumerate(self.features):
+                features = layer(features)
+                if index in self.MULTISCALE_STAGES:
+                    stage_features[index] = features
+            stage_features[16] = self.attention(stage_features[16])
+            pooled_features = [
+                self.multiscale_pool(stage_features[index]).flatten(1)
+                for index in self.MULTISCALE_STAGES
+            ]
+            features = torch.cat([
+                projection(pooled)
+                for projection, pooled in zip(self.multiscale_projections, pooled_features)
+            ], dim=1)
+        else:
+            features = self.attention(self.features(images))
+            features = torch.flatten(self.avgpool(features), 1)
         if self.metadata_encoder is not None:
             if metadata is None:
                 raise ValueError("This model requires age/sex/site metadata inputs")
@@ -73,7 +113,10 @@ class AttentionMobileNetV3(nn.Module):
 def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True,
                 classifier_hidden_dim: int = 256, classifier_dropout: float = 0.30,
                 drop_path_rate: float = 0.10,
-                model_name: str = "mobilenet_v3_large", metadata_dim: int = 0) -> nn.Module:
+                model_name: str = "mobilenet_v3_large", metadata_dim: int = 0,
+                multiscale_head: bool = False, multiscale_feature_dim: int = 128) -> nn.Module:
+    if multiscale_head and model_name != "mobilenet_v3_large":
+        raise ValueError("multiscale_head is currently implemented for mobilenet_v3_large only")
     if model_name != "mobilenet_v3_large":
         if metadata_dim:
             raise ValueError("Age/sex/site fusion is currently implemented for the MobileNetV3 classifier")
@@ -113,7 +156,8 @@ def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True
             module.add_module("drop_path", StochasticDepth(probability, mode="row"))
             module.forward = MethodType(_stochastic_residual_forward, module)
     return AttentionMobileNetV3(
-        base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout, metadata_dim
+        base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout,
+        metadata_dim, multiscale_head, multiscale_feature_dim,
     )
 
 

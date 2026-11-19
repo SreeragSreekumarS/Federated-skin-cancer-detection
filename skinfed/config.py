@@ -31,6 +31,8 @@ class TrainConfig:
     use_cbam: bool = True
     classifier_hidden_dim: int = 256
     classifier_dropout: float = 0.30
+    multiscale_head: bool = False
+    multiscale_feature_dim: int = 128
     # `learning_rate` is the classifier-head rate; feature layers use a lower
     # base rate and layer-wise decay in optimizer_parameter_groups.
     learning_rate: float = 1e-3
@@ -87,6 +89,10 @@ class TrainConfig:
             raise ValueError("dirichlet_alpha must be positive and client_fraction must be in (0, 1]")
         if self.classifier_hidden_dim < 1 or not 0 <= self.classifier_dropout < 1:
             raise ValueError("classifier_hidden_dim must be positive and classifier_dropout must be in [0, 1)")
+        if self.multiscale_feature_dim < 1:
+            raise ValueError("multiscale_feature_dim must be positive")
+        if self.multiscale_head and self.model_name != "mobilenet_v3_large":
+            raise ValueError("multiscale_head is currently implemented for mobilenet_v3_large only")
         if self.learning_rate <= 0 or self.min_learning_rate <= 0 or not 0 < self.lr_factor < 1 or self.lr_patience < 1:
             raise ValueError("learning-rate settings must be positive, lr_factor must be in (0, 1), and lr_patience must be positive")
         if self.backbone_learning_rate <= 0 or not 0 < self.layerwise_lr_decay <= 1:

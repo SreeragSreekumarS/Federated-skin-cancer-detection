@@ -255,3 +255,14 @@ The segmented configs use the same 288 px input size as the full-image configs. 
 - `learning_rate` sets the classifier-head rate (`0.001`). The backbone starts at `backbone_learning_rate: 0.0001`, with `layerwise_lr_decay` reducing rates for earlier feature layers. Validation-driven reductions scale all rates together.
 - Validation and final test metrics use EMA weights rather than raw weights. Local and centralized EMAs update per optimizer step (`ema_decay: 0.995`); the federated server EMA updates once per round (`server_ema_decay: 0.9`).
 - The global validation macro-F1 controls the learning-rate schedule. After `lr_patience` rounds without improvement, each client scales future rates by `lr_factor`, down to `min_learning_rate`.
+
+## MobileNetV3 multi-scale feature head
+
+The optional `multiscale_head` keeps the pretrained MobileNetV3-Large backbone and combines pooled outputs from three feature stages (40, 112, and 960 channels) before the classifier. This gives the classifier earlier fine-texture features as well as later semantic features; the existing CBAM remains on the final feature map. The new HAM profile changes only the classifier input relative to `ham10000_v3_384_fedprox_accuracy.yaml`, so it uses the same lesion-group split and training recipe:
+
+```bash
+python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml
+python -m centralized_baseline.train --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml --run-name ham10000_v3_384_multiscale_centralized
+```
+
+Compare `runs/ham10000_v3_384_multiscale/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. Check validation metrics before test metrics; this architectural change is an experiment and does not guarantee a higher accuracy. Existing configs leave `multiscale_head: false`, preserving their previous classifier design.

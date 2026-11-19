@@ -145,6 +145,8 @@ def main() -> None:
         drop_path_rate=config.drop_path_rate,
         model_name=config.model_name,
         metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0,
+        multiscale_head=config.multiscale_head,
+        multiscale_feature_dim=config.multiscale_feature_dim,
     ).to(device)
     ema = ModelEMA(model, config.ema_decay)
     freeze_features(model, frozen=config.freeze_backbone_rounds > 0)
@@ -269,6 +271,8 @@ def main() -> None:
                     "classifier_dropout": config.classifier_dropout,
                     "drop_path_rate": config.drop_path_rate,
                     "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0,
+                    "multiscale_head": config.multiscale_head,
+                    "multiscale_feature_dim": config.multiscale_feature_dim,
                 }, output / "best_model.pt")
             else:
                 stale += 1
