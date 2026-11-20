@@ -177,6 +177,7 @@ def main() -> None:
             config.strong_augmentation, config.balanced_sampling,
             config.cache_resized_images, config.use_metadata, config.image_enhancement,
             config.hair_removal_probability, config.color_constancy,
+            config.balanced_sampling_power,
         )
         model.train()
         for _ in range(config.local_epochs):

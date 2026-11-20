@@ -95,13 +95,13 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
                 balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False,
-                hair_removal_probability=0.0, color_constancy=False):
+                hair_removal_probability=0.0, color_constancy=False, balanced_sampling_power=0.5):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
         targets = frame.iloc[indices].target.to_numpy()
         counts = np.bincount(targets, minlength=int(frame.target.max()) + 1)
-        sample_weights = 1.0 / np.maximum(counts[targets], 1) ** config.balanced_sampling_power
+        sample_weights = 1.0 / np.maximum(counts[targets], 1) ** balanced_sampling_power
         sampler = WeightedRandomSampler(
             torch.as_tensor(sample_weights, dtype=torch.double),
             num_samples=len(indices), replacement=True, generator=generator,
@@ -183,7 +183,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     loader = make_loader(frame, indices, config.image_size, config.batch_size, config.num_workers, True,
                          config.seed + round_number, config.strong_augmentation, config.balanced_sampling,
                          config.cache_resized_images, config.use_metadata, config.image_enhancement,
-                         config.hair_removal_probability, config.color_constancy)
+                         config.hair_removal_probability, config.color_constancy,
+                         config.balanced_sampling_power)
     model.train(); optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):
@@ -264,6 +265,7 @@ def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, n
         use_metadata=config.use_metadata,
         image_enhancement=False,
         color_constancy=config.color_constancy,
+        balanced_sampling_power=config.balanced_sampling_power,
     )
     model.eval(); logits_all, targets = [], []
     view_count = config.tta_views if config.tta else 1
