@@ -1,13 +1,13 @@
-# Controlled architecture comparison against the 384px FedProx HAM profile.
-# The same seed, split, training recipe, and metadata are retained; only the
-# classifier input changes to a fusion of three MobileNetV3 feature stages.
+# Controlled architecture comparison against ham10000_v3_384_fedprox_accuracy.
+# Only the classifier head differs; keep the sampling, decision rule, and
+# client logit adjustment identical to the baseline.
 seed: 42
 split_seed: 42
 partition_mode: hospital_first
 run_name: ham10000_v3_384_multiscale_balanced
 model_name: mobilenet_v3_large
 use_metadata: true
-decision_metric: balanced_accuracy
+decision_metric: accuracy
 decision_accuracy_loss_cap: 0.01
 checkpoint_metric: accuracy
 class_weighting: none
@@ -56,7 +56,7 @@ strong_augmentation: true
 image_enhancement: false
 hair_removal_probability: 0.0
 color_constancy: false
-balanced_sampling: true
-balanced_sampling_power: 1.0
-client_logit_adjustment_strength: 0.1
+balanced_sampling: false
+balanced_sampling_power: 0.5
+client_logit_adjustment_strength: 0.0
 cache_resized_images: true
