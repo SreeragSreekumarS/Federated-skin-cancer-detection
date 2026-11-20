@@ -266,3 +266,17 @@ python -m centralized_baseline.train --manifest data/HAM10000/ham10000_metadata_
 ```
 
 Compare `runs/ham10000_v3_384_multiscale_balanced/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. This run changes the feature head and rare-class recipe together, so the comparison measures their combined effect. The decision-rule cap is measured on validation only; raw and selected test metrics are both reported. Class-balanced sampling cannot create examples for a class absent from a client's training partition. Existing configs leave `multiscale_head: false` and client logit adjustment off.
+
+## Previewing preprocessing effects
+
+Create a contact sheet of random images showing the original alongside hair removal, auto-contrast, sharpness, equalization, color constancy, and a combined diagnostic preview:
+
+```bash
+python tools/preview_preprocessing.py \
+  --manifest data/HAM10000/ham10000_metadata_manifest.csv \
+  --config config/ham10000_v3_384_accuracy.yaml \
+  --samples 6 --seed 42 \
+  --output runs/preprocessing_preview
+```
+
+Open `runs/preprocessing_preview/preprocessing_contact_sheet.png`. Each effect is forced separately so it is easy to inspect; training applies the enabled effects stochastically. The accuracy config enables enhancement operations (auto-contrast p=0.10, sharpness p=0.10, equalization p=0.05) and hair removal p=0.15. The current multi-scale config has those operations disabled (`image_enhancement: false`, `hair_removal_probability: 0.0`, `color_constancy: false`), so choose the config from the run whose preprocessing you want to inspect. Hair removal requires `opencv-python-headless`.
