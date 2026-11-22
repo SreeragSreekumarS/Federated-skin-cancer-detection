@@ -1,6 +1,7 @@
-# Controlled architecture comparison against the 384px FedProx HAM profile.
-# The same seed, split, training recipe, and metadata are retained; only the
-# classifier input changes to a fusion of three MobileNetV3 feature stages.
+# Combined multi-scale-head and rare-class-handling experiment relative to the
+# 384px FedProx HAM profile. It keeps the same lesion split seed and backbone,
+# while changing the classifier input, sampling, logit adjustment, and
+# validation decision selection.
 seed: 42
 split_seed: 42
 partition_mode: hospital_first

@@ -23,7 +23,9 @@ def main() -> int:
     config = TrainConfig(clients=3, dirichlet_alpha=1.0, rounds=1, local_epochs=1,
                          batch_size=4, gradient_accumulation=1, num_workers=0,
                          image_size=96, early_stopping_patience=1, freeze_backbone_rounds=1,
-                         amp=device.type == "cuda", tta=False)
+                         amp=device.type == "cuda", tta=False, multiscale_head=True,
+                         balanced_sampling=True, balanced_sampling_power=1.0,
+                         client_logit_adjustment_strength=0.1)
     with tempfile.TemporaryDirectory(prefix="skinfed-smoke-") as temporary:
         root = Path(temporary)
         records = []
@@ -43,14 +45,21 @@ def main() -> int:
         )
         counts = frame.iloc[np.concatenate(client_indices)].target.value_counts().reindex(range(len(classes)), fill_value=1).to_numpy()
         weights = torch.tensor(counts.sum() / (len(counts) * counts), dtype=torch.float32)
-        model = build_model(len(classes), pretrained=False, use_cbam=config.use_cbam).to(device)
+        model = build_model(
+            len(classes), pretrained=False, use_cbam=config.use_cbam,
+            classifier_hidden_dim=config.classifier_hidden_dim,
+            classifier_dropout=config.classifier_dropout,
+            drop_path_rate=config.drop_path_rate,
+            multiscale_head=config.multiscale_head,
+            multiscale_feature_dim=config.multiscale_feature_dim,
+        ).to(device)
         updates = [
             train_client(model, frame, indices, client_val_indices[i], config, device, weights, 1)
             for i, indices in enumerate(client_indices)
         ]
         aggregate(model, updates)
         metrics, _ = evaluate(model, frame, test_indices, config, device, classes)
-        print("SMOKE TEST PASSED")
+        print("MULTISCALE + BALANCED-FEDERATED SMOKE TEST PASSED")
         print(f"Device: {device}")
         print(json.dumps(metrics, indent=2))
     return 0
