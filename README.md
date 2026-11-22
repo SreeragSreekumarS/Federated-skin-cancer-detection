@@ -45,7 +45,7 @@ python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config
 
 The held-out test split remains untouched during training and checkpoint selection. This profile is aimed at improving top-line accuracy, so rare-class recall may decrease; no training recipe can guarantee 90% accuracy. Check `runs/ham10000_v3_384_accuracy/metrics.json` for final raw-argmax and selected test accuracy and class-level metrics.
 
-For a follow-up to a weak federated run, use `config/ham10000_v3_384_fedprox_accuracy.yaml`. It keeps `seed: 42`, `split_seed: 42`, the same hospital-first split settings, model, and image size; it uses the paper's 50 rounds, 3 local epochs per round, and batch size 32, while testing stronger FedProx (`0.01`), lower learning rates, full client-local balanced sampling, and raw inputs without hair removal or extra contrast/sharpness transforms. Run it as a separate experiment:
+For a follow-up to a weak federated run, use `config/ham10000_v3_384_fedprox_accuracy.yaml`. It keeps `seed: 42`, `split_seed: 42`, the same hospital-first split settings, model, and image size; it uses the paper's 50 rounds, 3 local epochs per round, and batch size 32, while testing stronger FedProx (`0.01`), lower learning rates, and raw inputs without hair removal or extra contrast/sharpness transforms. Run it as a separate experiment:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_fedprox_accuracy.yaml
@@ -258,14 +258,14 @@ The segmented configs use the same 288 px input size as the full-image configs. 
 
 ## MobileNetV3 multi-scale feature head
 
-The optional `multiscale_head` keeps the pretrained MobileNetV3-Large backbone and combines pooled outputs from three feature stages (40, 112, and 960 channels) before the classifier. This gives the classifier earlier fine-texture features as well as later semantic features; the existing CBAM remains on the final feature map. The HAM multi-scale profile matches the FedProx accuracy profile in sampling, decision selection, logit adjustment, and training recipe; the only change is enabling the multi-scale head. Both use the same 384px, 50-round, 3-epoch, batch-32, FedProx 0.01 setup and lesion-group split. Balanced sampling is enabled in both profiles to support rare classes:
+The optional `multiscale_head` keeps the pretrained MobileNetV3-Large backbone and combines pooled outputs from three feature stages (40, 112, and 960 channels) before the classifier. This gives the classifier earlier fine-texture features as well as later semantic features; the existing CBAM remains on the final feature map. The HAM profile keeps the 384px, 50-round, 3-epoch, batch-32, FedProx 0.01 training setup and lesion-group split. It also enables client-local inverse-frequency sampling, mild client-specific log-prior adjustment (`0.1`), and validation selection by balanced accuracy with at most a 1 percentage-point accuracy loss versus raw argmax:
 
 ```bash
 python train.py --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml
 python -m centralized_baseline.train --manifest data/HAM10000/ham10000_metadata_manifest.csv --config config/ham10000_v3_384_multiscale.yaml --run-name ham10000_v3_384_multiscale_centralized
 ```
 
-Compare `runs/ham10000_v3_384_multiscale_balanced/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. With the same seed and split, this is an architecture comparison of the classifier head. Class-balanced sampling cannot create examples for a class absent from a client's training partition. The baseline leaves `multiscale_head: false`; client logit adjustment remains off in both configs.
+Compare `runs/ham10000_v3_384_multiscale_balanced/metrics.json` with `runs/ham10000_v3_384_fedprox_accuracy/metrics.json`, especially combined raw-argmax test accuracy, balanced accuracy, macro-F1, and per-class sensitivity. This run changes the feature head and rare-class recipe together, so the comparison measures their combined effect. The decision-rule cap is measured on validation only; raw and selected test metrics are both reported. Class-balanced sampling cannot create examples for a class absent from a client's training partition. Existing configs leave `multiscale_head: false` and client logit adjustment off.
 
 ## Previewing preprocessing effects
 

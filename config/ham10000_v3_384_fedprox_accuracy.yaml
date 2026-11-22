@@ -51,7 +51,5 @@ amp: true
 strong_augmentation: true
 image_enhancement: false
 hair_removal_probability: 0.0
-balanced_sampling: true
-balanced_sampling_power: 1.0
-client_logit_adjustment_strength: 0.0
+balanced_sampling: false
 cache_resized_images: true
