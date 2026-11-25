@@ -13,9 +13,9 @@ aggregation_weighting: samples
 min_groups_per_class_per_hospital: 3
 clients: 3
 dirichlet_alpha: 1.0
-rounds: 50
+rounds: 35
 client_fraction: 1.0
-local_epochs: 3
+local_epochs: 2
 batch_size: 32
 gradient_accumulation: 1
 num_workers: 2
