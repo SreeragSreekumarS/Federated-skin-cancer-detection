@@ -33,6 +33,18 @@ class CBAM(nn.Module):
         return features * torch.sigmoid(self.spatial(spatial_input))
 
 
+class GeMPool(nn.Module):
+    """Learnable generalized-mean pooling for non-negative feature maps."""
+    def __init__(self, initial_power: float = 3.0) -> None:
+        super().__init__()
+        self.power = nn.Parameter(torch.tensor(float(initial_power)))
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        power = self.power.clamp(1.0, 6.0)
+        features = nn.functional.relu(features).clamp_min(1e-6)
+        return nn.functional.avg_pool2d(features.pow(power), kernel_size=features.shape[-2:]).pow(1.0 / power)
+
+
 class AttentionMobileNetV3(nn.Module):
     # MobileNetV3-Large outputs these channel widths at progressively later
     # stages: 40 (index 6), 112 (index 12), and 960 (index 16).
@@ -41,11 +53,13 @@ class AttentionMobileNetV3(nn.Module):
     def __init__(self, base: nn.Module, num_classes: int, use_cbam: bool,
                  classifier_hidden_dim: int, classifier_dropout: float,
                  metadata_dim: int = 0, multiscale_head: bool = False,
-                 multiscale_feature_dim: int = 128) -> None:
+                 multiscale_feature_dim: int = 128, pooling: str = "avg") -> None:
         super().__init__()
         self.features = base.features
         self.attention = CBAM(960) if use_cbam else nn.Identity()
         self.avgpool = base.avgpool
+        self.pooling = pooling
+        self.gem_pool = GeMPool() if pooling == "gem" and not multiscale_head else None
         # A compact regularized head gives CBAM-refined features room to adapt to
         # dermoscopic classes without materially changing the lightweight backbone.
         # MobileNetV3-Large's feature extractor emits 960 channels.  Its final
@@ -55,7 +69,10 @@ class AttentionMobileNetV3(nn.Module):
         self.multiscale_head = multiscale_head
         self.multiscale_feature_dim = multiscale_feature_dim
         if multiscale_head:
-            self.multiscale_pool = nn.AdaptiveAvgPool2d(1)
+            self.multiscale_pool = nn.ModuleList([
+                GeMPool() if pooling == "gem" else nn.AdaptiveAvgPool2d(1)
+                for _ in self.MULTISCALE_STAGES
+            ])
             self.multiscale_projections = nn.ModuleList([
                 nn.Sequential(
                     nn.Linear(channels, multiscale_feature_dim),
@@ -91,8 +108,8 @@ class AttentionMobileNetV3(nn.Module):
                     stage_features[index] = features
             stage_features[16] = self.attention(stage_features[16])
             pooled_features = [
-                self.multiscale_pool(stage_features[index]).flatten(1)
-                for index in self.MULTISCALE_STAGES
+                pool(stage_features[index]).flatten(1)
+                for pool, index in zip(self.multiscale_pool, self.MULTISCALE_STAGES)
             ]
             features = torch.cat([
                 projection(pooled)
@@ -100,7 +117,8 @@ class AttentionMobileNetV3(nn.Module):
             ], dim=1)
         else:
             features = self.attention(self.features(images))
-            features = torch.flatten(self.avgpool(features), 1)
+            pooled = self.gem_pool(features) if self.gem_pool is not None else self.avgpool(features)
+            features = torch.flatten(pooled, 1)
         if self.metadata_encoder is not None:
             if metadata is None:
                 raise ValueError("This model requires age/sex/site metadata inputs")
@@ -114,7 +132,8 @@ def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True
                 classifier_hidden_dim: int = 256, classifier_dropout: float = 0.30,
                 drop_path_rate: float = 0.10,
                 model_name: str = "mobilenet_v3_large", metadata_dim: int = 0,
-                multiscale_head: bool = False, multiscale_feature_dim: int = 128) -> nn.Module:
+                multiscale_head: bool = False, multiscale_feature_dim: int = 128,
+                pooling: str = "avg") -> nn.Module:
     if multiscale_head and model_name != "mobilenet_v3_large":
         raise ValueError("multiscale_head is currently implemented for mobilenet_v3_large only")
     if model_name != "mobilenet_v3_large":
@@ -158,6 +177,7 @@ def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True
     return AttentionMobileNetV3(
         base, num_classes, use_cbam, classifier_hidden_dim, classifier_dropout,
         metadata_dim, multiscale_head, multiscale_feature_dim,
+        pooling,
     )
 
 
@@ -184,7 +204,7 @@ def model_backbone_layers(model: nn.Module) -> list[nn.Module]:
     raise TypeError(f"Cannot identify backbone stages for {type(model).__name__}")
 
 
-def freeze_features(model: nn.Module, frozen: bool) -> None:
-    for layer in model_backbone_layers(model):
+def freeze_features(model: nn.Module, frozen: bool, early_stages: int = 0) -> None:
+    for index, layer in enumerate(model_backbone_layers(model)):
         for parameter in layer.parameters():
-            parameter.requires_grad = not frozen
+            parameter.requires_grad = not (frozen or index < early_stages)

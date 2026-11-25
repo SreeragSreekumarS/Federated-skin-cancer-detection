@@ -147,6 +147,7 @@ def main() -> None:
         metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0,
         multiscale_head=config.multiscale_head,
         multiscale_feature_dim=config.multiscale_feature_dim,
+        pooling=config.pooling,
     ).to(device)
     ema = ModelEMA(model, config.ema_decay)
     freeze_features(model, frozen=config.freeze_backbone_rounds > 0)
@@ -163,7 +164,7 @@ def main() -> None:
     stop_training = False
     for round_number in range(1, config.rounds + 1):
         frozen = round_number <= config.freeze_backbone_rounds
-        freeze_features(model, frozen=frozen)
+        freeze_features(model, frozen=frozen, early_stages=config.freeze_early_stages)
         optimizer = torch.optim.AdamW(
             optimizer_parameter_groups(model, config, current_lr),
             weight_decay=config.weight_decay,
@@ -274,6 +275,7 @@ def main() -> None:
                     "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0,
                     "multiscale_head": config.multiscale_head,
                     "multiscale_feature_dim": config.multiscale_feature_dim,
+                    "pooling": config.pooling,
                 }, output / "best_model.pt")
             else:
                 stale += 1

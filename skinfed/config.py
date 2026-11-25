@@ -19,6 +19,9 @@ class TrainConfig:
     class_weighting: str = "auto"
     preserve_melanoma_sensitivity: bool = True
     aggregation_weighting: str = "samples"
+    batchnorm_policy: str = "average"
+    freeze_early_stages: int = 0
+    server_momentum: float = 0.0
     min_groups_per_class_per_hospital: int = 3
     clients: int = 3
     dirichlet_alpha: float = 1.0
@@ -34,6 +37,7 @@ class TrainConfig:
     classifier_dropout: float = 0.30
     multiscale_head: bool = False
     multiscale_feature_dim: int = 128
+    pooling: str = "avg"
     # `learning_rate` is the classifier-head rate; feature layers use a lower
     # base rate and layer-wise decay in optimizer_parameter_groups.
     learning_rate: float = 1e-3
@@ -88,6 +92,14 @@ class TrainConfig:
             raise ValueError("partition_mode must be global, hospital_first, or source")
         if self.aggregation_weighting not in {"samples", "quality"}:
             raise ValueError("aggregation_weighting must be samples or quality")
+        if self.batchnorm_policy not in {"average", "freeze_stats"}:
+            raise ValueError("batchnorm_policy must be average or freeze_stats")
+        if self.freeze_early_stages < 0:
+            raise ValueError("freeze_early_stages must be non-negative")
+        if not 0 <= self.server_momentum < 1:
+            raise ValueError("server_momentum must be in [0, 1)")
+        if self.pooling not in {"avg", "gem"}:
+            raise ValueError("pooling must be avg or gem")
         if self.min_groups_per_class_per_hospital < 1:
             raise ValueError("min_groups_per_class_per_hospital must be at least 1")
         if self.client_logit_adjustment_strength < 0:

@@ -51,6 +51,8 @@ def main():
     if device.type != "cuda": print("WARNING: CUDA is unavailable; this run will be slow on CPU.")
     else: print(f"Using {torch.cuda.get_device_name(0)}")
     print(f"Federated aggregation weighting: {config.aggregation_weighting}")
+    print(f"BatchNorm policy: {config.batchnorm_policy}; server momentum: {config.server_momentum}")
+    print(f"Frozen early backbone stages: {config.freeze_early_stages}; pooling: {config.pooling}")
     print(
         "Client-local class balancing: "
         f"{'on (power=' + str(config.balanced_sampling_power) + ')' if config.balanced_sampling else 'off'}"
@@ -120,11 +122,13 @@ def main():
                         drop_path_rate=config.drop_path_rate, model_name=config.model_name,
                         metadata_dim=METADATA_FEATURE_DIM if config.use_metadata else 0,
                         multiscale_head=config.multiscale_head,
-                        multiscale_feature_dim=config.multiscale_feature_dim).to(device)
+                        multiscale_feature_dim=config.multiscale_feature_dim,
+                        pooling=config.pooling).to(device)
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
     best_score, stale, lr_stale, current_lr, history = -1.0, 0, 0, config.learning_rate, []
+    server_momentum_state = {}
     for round_number in range(1, config.rounds + 1):
         rng = np.random.default_rng(config.seed + round_number)
         selected_count = max(1, math.ceil(config.clients * config.client_fraction))
@@ -133,7 +137,8 @@ def main():
             train_client(model, frame, client_indices[i], client_val_indices[i], config, device, weights, round_number, current_lr)
             for i in selected
         ]
-        aggregate(model, updates, config.aggregation_weighting)
+        aggregate(model, updates, config.aggregation_weighting, config.batchnorm_policy,
+                  config.server_momentum, server_momentum_state)
         ema.update(model)
         metrics, _ = evaluate(ema.ema, frame, val_indices, config, device, class_names)
         metrics["round"] = round_number; metrics["learning_rate"] = current_lr
@@ -153,7 +158,8 @@ def main():
                         "drop_path_rate": config.drop_path_rate,
                         "metadata_dim": METADATA_FEATURE_DIM if config.use_metadata else 0,
                         "multiscale_head": config.multiscale_head,
-                        "multiscale_feature_dim": config.multiscale_feature_dim}, output / "best_model.pt")
+                        "multiscale_feature_dim": config.multiscale_feature_dim,
+                        "pooling": config.pooling}, output / "best_model.pt")
         else:
             stale += 1
             lr_stale += 1

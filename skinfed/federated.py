@@ -75,10 +75,14 @@ def optimizer_parameter_groups(model: nn.Module, config, head_learning_rate: flo
     return groups
 
 
-def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, float, dict]], weighting: str = "samples") -> None:
-    """Aggregate local EMA states using FedAvg or optional present-class quality weights."""
+def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, float, dict]], weighting: str = "samples",
+              batchnorm_policy: str = "average", server_momentum: float = 0.0,
+              momentum_state: dict[str, torch.Tensor] | None = None) -> None:
+    """Aggregate local EMA states, optionally freezing BN stats and using FedAvgM."""
     if weighting not in {"samples", "quality"}:
         raise ValueError("weighting must be samples or quality")
+    if batchnorm_policy not in {"average", "freeze_stats"}:
+        raise ValueError("batchnorm_policy must be average or freeze_stats")
     if weighting == "samples":
         weights = np.array([samples for _, samples, _, _ in updates], dtype=float)
     else:
@@ -86,11 +90,37 @@ def aggregate(global_model: nn.Module, updates: list[tuple[OrderedDict, int, flo
     weights /= weights.sum()
     merged = OrderedDict()
     for key, initial in global_model.state_dict().items():
+        is_bn_stat = key.endswith(("running_mean", "running_var", "num_batches_tracked"))
+        if batchnorm_policy == "freeze_stats" and is_bn_stat:
+            merged[key] = initial
+            continue
         if not torch.is_floating_point(initial):
-            merged[key] = updates[0][0][key]
+            merged[key] = updates[0][0][key] if not is_bn_stat else initial
         else:
             merged[key] = sum(update[key].to(torch.float32) * float(weight) for (update, _, _, _), weight in zip(updates, weights)).to(initial.dtype)
+    if server_momentum:
+        if momentum_state is None:
+            raise ValueError("momentum_state is required when server_momentum is enabled")
+        for key, initial in global_model.state_dict().items():
+            if not torch.is_floating_point(initial):
+                continue
+            if batchnorm_policy == "freeze_stats" and key.endswith(("running_mean", "running_var")):
+                continue
+            delta = merged[key].to(device=initial.device, dtype=torch.float32) - initial.to(torch.float32)
+            velocity = momentum_state.get(key)
+            velocity = torch.zeros_like(delta) if velocity is None else velocity.to(delta.device)
+            velocity.mul_(server_momentum).add_(delta)
+            momentum_state[key] = velocity.detach().cpu()
+            merged[key] = (initial.to(torch.float32) + velocity).to(initial.dtype)
     global_model.load_state_dict(merged, strict=True)
+
+
+def apply_batchnorm_policy(model: nn.Module, policy: str) -> None:
+    """Keep BN affine parameters trainable while optionally fixing running stats."""
+    if policy == "freeze_stats":
+        for module in model.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
 
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
@@ -154,7 +184,7 @@ def mixup_cutmix(images: torch.Tensor, targets: torch.Tensor, config, metadata=N
 def train_client(global_model, frame, indices, val_indices, config, device, class_weights, round_number, learning_rate=None):
     model = copy.deepcopy(global_model).to(device)
     frozen = round_number <= config.freeze_backbone_rounds
-    freeze_features(model, frozen)
+    freeze_features(model, frozen, config.freeze_early_stages)
     effective_lr = learning_rate or config.learning_rate
     optimizer = torch.optim.AdamW(
         optimizer_parameter_groups(model, config, effective_lr),
@@ -185,9 +215,13 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                          config.cache_resized_images, config.use_metadata, config.image_enhancement,
                          config.hair_removal_probability, config.color_constancy,
                          config.balanced_sampling_power)
-    model.train(); optimizer.zero_grad(set_to_none=True)
+    model.train()
+    apply_batchnorm_policy(model, config.batchnorm_policy)
+    optimizer.zero_grad(set_to_none=True)
     train_loss_sum, train_correct, train_samples = 0.0, 0, 0
     for _ in range(config.local_epochs):
+        model.train()
+        apply_batchnorm_policy(model, config.batchnorm_policy)
         for step, batch in enumerate(loader, 1):
             if config.use_metadata:
                 images, metadata, targets = batch

@@ -69,6 +69,7 @@ def main() -> None:
             metadata_dim=checkpoint.get("metadata_dim", METADATA_FEATURE_DIM if config.use_metadata else 0),
             multiscale_head=checkpoint.get("multiscale_head", config.multiscale_head),
             multiscale_feature_dim=checkpoint.get("multiscale_feature_dim", config.multiscale_feature_dim),
+            pooling=checkpoint.get("pooling", config.pooling),
         ).to(device)
         model.load_state_dict(checkpoint["model_state"])
         model.eval()
