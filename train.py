@@ -11,7 +11,7 @@ from skinfed.data import (
 )
 from skinfed.federated import ModelEMA, aggregate, evaluate, predict_logits, train_client
 from skinfed.calibration import apply_decision_rule, select_decision_rule
-from skinfed.metrics import classification_metrics
+from skinfed.metrics import checkpoint_score, classification_metrics
 from skinfed.model import build_model
 from skinfed.plots import save_result_plots
 
@@ -127,7 +127,7 @@ def main():
     # The server updates once per round, so its EMA decay is shorter than the
     # per-optimizer-step EMA used by local/centralized trainers.
     ema = ModelEMA(model, config.server_ema_decay)
-    best_score, stale, lr_stale, current_lr, history = -1.0, 0, 0, config.learning_rate, []
+    best_score, stale, lr_stale, current_lr, history = float("-inf"), 0, 0, config.learning_rate, []
     server_momentum_state = {}
     for round_number in range(1, config.rounds + 1):
         rng = np.random.default_rng(config.seed + round_number)
@@ -148,7 +148,7 @@ def main():
         }
         history.append(metrics)
         print(f"round {round_number}: val macro-F1={metrics['macro_f1']:.4f}, balanced accuracy={metrics['balanced_accuracy']:.4f}")
-        score = metrics[config.checkpoint_metric]
+        score = checkpoint_score(metrics, config.checkpoint_metric)
         if score > best_score:
             best_score, stale, lr_stale = score, 0, 0
             torch.save({"model_state": ema.ema.state_dict(), "class_names": class_names,

@@ -7,6 +7,14 @@ from sklearn.metrics import (
 )
 
 
+def checkpoint_score(metrics: dict, metric: str) -> float:
+    """Return a maximization score for a validation metric."""
+    value = float(metrics[metric])
+    if not np.isfinite(value):
+        raise ValueError(f"Validation checkpoint metric {metric!r} is not finite: {value}")
+    return -value if metric == "log_loss" else value
+
+
 def classification_metrics(targets: list[int], probabilities: np.ndarray, class_names: list[str], predicted_labels: np.ndarray | None = None) -> tuple[dict, np.ndarray]:
     y_true = np.asarray(targets)
     probabilities = np.asarray(probabilities, dtype=np.float64)

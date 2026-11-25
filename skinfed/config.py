@@ -82,8 +82,8 @@ class TrainConfig:
             raise ValueError("decision_metric must be accuracy, balanced_accuracy, or macro_f1")
         if not 0 <= self.decision_accuracy_loss_cap <= 1:
             raise ValueError("decision_accuracy_loss_cap must be between 0 and 1")
-        if self.checkpoint_metric not in {"accuracy", "macro_f1"}:
-            raise ValueError("checkpoint_metric must be accuracy or macro_f1")
+        if self.checkpoint_metric not in {"accuracy", "macro_f1", "balanced_accuracy", "log_loss"}:
+            raise ValueError("checkpoint_metric must be accuracy, macro_f1, balanced_accuracy, or log_loss")
         if self.class_weighting not in {"auto", "inverse_frequency", "none"}:
             raise ValueError("class_weighting must be auto, inverse_frequency, or none")
         if not 0 <= self.hair_removal_probability <= 1:

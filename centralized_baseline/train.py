@@ -20,6 +20,7 @@ from skinfed.federated import (
 )
 from skinfed.calibration import apply_decision_rule, select_decision_rule
 from skinfed.metrics import classification_metrics
+from skinfed.metrics import checkpoint_score
 from skinfed.model import build_model
 from skinfed.model import freeze_features
 from skinfed.plots import save_result_plots
@@ -155,7 +156,7 @@ def main() -> None:
         device.type, enabled=config.amp and device.type == "cuda"
     )
 
-    best_score, stale, lr_stale = -1.0, 0, 0
+    best_score, stale, lr_stale = float("-inf"), 0, 0
     current_lr = config.learning_rate
     history: list[dict] = []
     # Each centralized round makes local_epochs passes through the full global
@@ -261,7 +262,7 @@ def main() -> None:
                 f"time={metrics['epoch_seconds']:.1f}s "
                 f"step={metrics['milliseconds_per_step']:.0f}ms"
             )
-            score = metrics[config.checkpoint_metric]
+            score = checkpoint_score(metrics, config.checkpoint_metric)
             if score > best_score:
                 best_score, stale, lr_stale = score, 0, 0
                 torch.save({
