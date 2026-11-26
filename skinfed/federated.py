@@ -126,8 +126,7 @@ def apply_batchnorm_policy(model: nn.Module, policy: str) -> None:
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
                 balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False,
                 hair_removal_probability=0.0, color_constancy=False, balanced_sampling_power=0.5,
-                normalization_mean=(0.485, 0.456, 0.406), normalization_std=(0.229, 0.224, 0.225),
-                paper_scale_augmentation=False):
+                normalization_mean=(0.485, 0.456, 0.406), normalization_std=(0.229, 0.224, 0.225)):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
@@ -145,8 +144,7 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
                        hair_removal_probability=hair_removal_probability if training else 0.0,
                        color_constancy=color_constancy,
                        normalization_mean=normalization_mean,
-                       normalization_std=normalization_std,
-                       paper_scale_augmentation=paper_scale_augmentation),
+                       normalization_std=normalization_std),
         use_metadata=use_metadata,
     ), batch_size=batch_size,
                       shuffle=training and sampler is None, sampler=sampler,
@@ -191,15 +189,10 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
     frozen = round_number <= config.freeze_backbone_rounds
     freeze_features(model, frozen, config.freeze_early_stages)
     effective_lr = learning_rate or config.learning_rate
-    parameter_groups = optimizer_parameter_groups(model, config, effective_lr)
-    if config.optimizer == "sgd":
-        # SGD uses the paper's single client learning rate for every layer.
-        optimizer = torch.optim.SGD(
-            [parameter for group in parameter_groups for parameter in group["params"]],
-            lr=effective_lr, momentum=0.9, weight_decay=config.weight_decay,
-        )
-    else:
-        optimizer = torch.optim.AdamW(parameter_groups, weight_decay=config.weight_decay)
+    optimizer = torch.optim.AdamW(
+        optimizer_parameter_groups(model, config, effective_lr),
+        weight_decay=config.weight_decay,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.local_epochs))
     # Balanced sampling and inverse-frequency loss weights compound each other;
     # use neutral class weights when batches are rebalanced.
@@ -225,7 +218,7 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                          config.cache_resized_images, config.use_metadata, config.image_enhancement,
                          config.hair_removal_probability, config.color_constancy,
                          config.balanced_sampling_power, config.normalization_mean,
-                         config.normalization_std, config.paper_scale_augmentation)
+                         config.normalization_std)
     model.train()
     apply_batchnorm_policy(model, config.batchnorm_policy)
     optimizer.zero_grad(set_to_none=True)

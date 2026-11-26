@@ -440,7 +440,6 @@ def transforms_for(
     color_constancy: bool = False,
     normalization_mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
     normalization_std: tuple[float, float, float] = (0.229, 0.224, 0.225),
-    paper_scale_augmentation: bool = False,
 ):
     normalize = transforms.Normalize(normalization_mean, normalization_std)
     preprocessing = [] if already_resized else [ResizeWithPad(image_size)]
@@ -451,10 +450,7 @@ def transforms_for(
             *preprocessing,
             RandomHairRemoval(hair_removal_probability),
             transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
-            transforms.RandomAffine(
-                degrees=15, scale=(0.9, 1.1) if paper_scale_augmentation else None,
-                fill=(123, 116, 103),
-            ),
+            transforms.RandomRotation(15, fill=(123, 116, 103)),
             transforms.ColorJitter(0.12, 0.12, 0.08, 0.03),
         ]
         # Optional robustness transforms are deliberately conservative. Keep them

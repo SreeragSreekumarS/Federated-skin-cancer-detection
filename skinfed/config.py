@@ -12,7 +12,6 @@ class TrainConfig:
     partition_mode: str = "global"
     run_name: str = "gtx1650_federated_mobilenetv3"
     model_name: str = "mobilenet_v3_large"
-    optimizer: str = "adamw"
     use_metadata: bool = False
     decision_metric: str = "accuracy"
     decision_accuracy_loss_cap: float = 0.01
@@ -68,7 +67,6 @@ class TrainConfig:
     tta_views: int = 8
     amp: bool = True
     strong_augmentation: bool = False
-    paper_scale_augmentation: bool = False
     image_enhancement: bool = False
     hair_removal_probability: float = 0.0
     color_constancy: bool = False
@@ -80,8 +78,6 @@ class TrainConfig:
     def validate(self) -> None:
         if self.clients < 2 or self.rounds < 1 or self.batch_size < 1:
             raise ValueError("clients must be >= 2; rounds and batch_size must be positive")
-        if self.optimizer not in {"adamw", "sgd"}:
-            raise ValueError("optimizer must be adamw or sgd")
         if self.tta_views not in {1, 2, 4, 8}:
             raise ValueError("tta_views must be one of 1, 2, 4, or 8")
         if self.decision_metric not in {"accuracy", "balanced_accuracy", "macro_f1"}:
