@@ -38,6 +38,8 @@ class TrainConfig:
     multiscale_head: bool = False
     multiscale_feature_dim: int = 128
     pooling: str = "avg"
+    normalization_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    normalization_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
     # `learning_rate` is the classifier-head rate; feature layers use a lower
     # base rate and layer-wise decay in optimizer_parameter_groups.
     learning_rate: float = 1e-3
@@ -100,6 +102,10 @@ class TrainConfig:
             raise ValueError("server_momentum must be in [0, 1)")
         if self.pooling not in {"avg", "gem"}:
             raise ValueError("pooling must be avg or gem")
+        if len(self.normalization_mean) != 3 or len(self.normalization_std) != 3:
+            raise ValueError("normalization_mean and normalization_std must each contain 3 values")
+        if any(value <= 0 for value in self.normalization_std):
+            raise ValueError("normalization_std values must be positive")
         if self.min_groups_per_class_per_hospital < 1:
             raise ValueError("min_groups_per_class_per_hospital must be at least 1")
         if self.client_logit_adjustment_strength < 0:

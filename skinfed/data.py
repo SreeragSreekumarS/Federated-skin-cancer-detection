@@ -438,8 +438,10 @@ def transforms_for(
     image_enhancement: bool = False,
     hair_removal_probability: float = 0.0,
     color_constancy: bool = False,
+    normalization_mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
+    normalization_std: tuple[float, float, float] = (0.229, 0.224, 0.225),
 ):
-    normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    normalize = transforms.Normalize(normalization_mean, normalization_std)
     preprocessing = [] if already_resized else [ResizeWithPad(image_size)]
     if color_constancy:
         preprocessing.append(GrayWorldColorConstancy())

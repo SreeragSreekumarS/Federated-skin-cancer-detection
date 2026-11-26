@@ -125,7 +125,8 @@ def apply_batchnorm_policy(model: nn.Module, policy: str) -> None:
 
 def make_loader(frame, indices, image_size, batch_size, workers, training, seed, strong_augmentation=False,
                 balanced_sampling=False, cache_resized=False, use_metadata=False, image_enhancement=False,
-                hair_removal_probability=0.0, color_constancy=False, balanced_sampling_power=0.5):
+                hair_removal_probability=0.0, color_constancy=False, balanced_sampling_power=0.5,
+                normalization_mean=(0.485, 0.456, 0.406), normalization_std=(0.229, 0.224, 0.225)):
     generator = torch.Generator().manual_seed(seed)
     sampler = None
     if training and balanced_sampling:
@@ -141,7 +142,9 @@ def make_loader(frame, indices, image_size, batch_size, workers, training, seed,
         transforms_for(image_size, training, strong_augmentation, already_resized=cache_resized,
                        image_enhancement=image_enhancement,
                        hair_removal_probability=hair_removal_probability if training else 0.0,
-                       color_constancy=color_constancy),
+                       color_constancy=color_constancy,
+                       normalization_mean=normalization_mean,
+                       normalization_std=normalization_std),
         use_metadata=use_metadata,
     ), batch_size=batch_size,
                       shuffle=training and sampler is None, sampler=sampler,
@@ -214,7 +217,8 @@ def train_client(global_model, frame, indices, val_indices, config, device, clas
                          config.seed + round_number, config.strong_augmentation, config.balanced_sampling,
                          config.cache_resized_images, config.use_metadata, config.image_enhancement,
                          config.hair_removal_probability, config.color_constancy,
-                         config.balanced_sampling_power)
+                         config.balanced_sampling_power, config.normalization_mean,
+                         config.normalization_std)
     model.train()
     apply_batchnorm_policy(model, config.batchnorm_policy)
     optimizer.zero_grad(set_to_none=True)
@@ -300,6 +304,8 @@ def predict_logits(model, frame, indices, config, device) -> tuple[np.ndarray, n
         image_enhancement=False,
         color_constancy=config.color_constancy,
         balanced_sampling_power=config.balanced_sampling_power,
+        normalization_mean=config.normalization_mean,
+        normalization_std=config.normalization_std,
     )
     model.eval(); logits_all, targets = [], []
     view_count = config.tta_views if config.tta else 1

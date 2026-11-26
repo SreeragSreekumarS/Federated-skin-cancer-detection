@@ -45,6 +45,31 @@ class GeMPool(nn.Module):
         return nn.functional.avg_pool2d(features.pow(power), kernel_size=features.shape[-2:]).pow(1.0 / power)
 
 
+class TimmMetadataClassifier(nn.Module):
+    """Attach the project's approved age/sex/site MLP to a timm image model."""
+    def __init__(self, backbone: nn.Module, num_classes: int, metadata_dim: int,
+                 hidden_dim: int, dropout: float) -> None:
+        super().__init__()
+        self.backbone = backbone
+        feature_dim = int(backbone.num_features)
+        self.metadata_encoder = nn.Sequential(
+            nn.Linear(metadata_dim, 64), nn.LayerNorm(64), nn.Hardswish()
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(feature_dim + 64, hidden_dim), nn.LayerNorm(hidden_dim),
+            nn.Hardswish(), nn.Dropout(dropout), nn.Linear(hidden_dim, num_classes),
+        )
+
+    def forward(self, images: torch.Tensor, metadata: torch.Tensor | None = None) -> torch.Tensor:
+        if metadata is None:
+            raise ValueError("This model requires age/sex/site metadata inputs")
+        features = self.backbone.forward_features(images)
+        features = self.backbone.forward_head(features, pre_logits=True)
+        if features.ndim > 2:
+            features = torch.flatten(features, 1)
+        return self.classifier(torch.cat((features, self.metadata_encoder(metadata)), dim=1))
+
+
 class AttentionMobileNetV3(nn.Module):
     # MobileNetV3-Large outputs these channel widths at progressively later
     # stages: 40 (index 6), 112 (index 12), and 960 (index 16).
@@ -137,23 +162,27 @@ def build_model(num_classes: int, pretrained: bool = True, use_cbam: bool = True
     if multiscale_head and model_name != "mobilenet_v3_large":
         raise ValueError("multiscale_head is currently implemented for mobilenet_v3_large only")
     if model_name != "mobilenet_v3_large":
-        if metadata_dim:
-            raise ValueError("Age/sex/site fusion is currently implemented for the MobileNetV3 classifier")
         try:
             import timm
         except ImportError as error:
             raise RuntimeError(
                 f"Model '{model_name}' requires timm; install a recent release with `pip install -U timm`."
             ) from error
-        available = timm.list_models()
-        if model_name not in available:
+        if not timm.is_model(model_name):
             raise ValueError(
                 f"Model '{model_name}' is unavailable in timm {timm.__version__}. "
-                "Upgrade timm and confirm availability with `python -c \"import timm; "
-                "print(timm.__version__, 'mobilenetv4_conv_medium' in timm.list_models())\"`."
+                "Upgrade timm and confirm that the model name is registered."
             )
         if use_cbam:
             warnings.warn("CBAM is specific to the MobileNetV3 wrapper; the timm model uses its native head.", stacklevel=2)
+        if metadata_dim:
+            backbone = timm.create_model(
+                model_name, pretrained=pretrained, num_classes=0,
+                drop_rate=classifier_dropout, drop_path_rate=drop_path_rate,
+            )
+            return TimmMetadataClassifier(
+                backbone, num_classes, metadata_dim, classifier_hidden_dim, classifier_dropout,
+            )
         return timm.create_model(
             model_name,
             pretrained=pretrained,
@@ -201,6 +230,14 @@ def model_backbone_layers(model: nn.Module) -> list[nn.Module]:
             if isinstance(getattr(model, name, None), nn.Module)
         )
         return layers
+    if hasattr(model, "stages") and hasattr(model, "stem"):
+        layers = [model.stem, *list(model.stages.children())]
+        final_conv = getattr(model, "final_conv", None)
+        if isinstance(final_conv, nn.Module) and not isinstance(final_conv, nn.Identity):
+            layers.append(final_conv)
+        return layers
+    if hasattr(model, "backbone") and isinstance(model.backbone, nn.Module):
+        return model_backbone_layers(model.backbone)
     raise TypeError(f"Cannot identify backbone stages for {type(model).__name__}")
 
 
