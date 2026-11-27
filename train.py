@@ -7,7 +7,7 @@ import torch
 from skinfed.config import load_config, save_config
 from skinfed.data import (
     METADATA_FEATURE_DIM, cache_resized_images, encode_metadata,
-    make_federated_splits, make_source_splits, read_manifest,
+    make_federated_splits, make_image_level_federated_splits, make_source_splits, read_manifest,
 )
 from skinfed.federated import ModelEMA, aggregate, evaluate, predict_logits, train_client
 from skinfed.calibration import apply_decision_rule, select_decision_rule
@@ -78,6 +78,12 @@ def main():
         client_names = ["BCN", "MSK"]
         client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_source_splits(
             frame, config.train_fraction, config.val_fraction, config.split_seed,
+        )
+    elif config.partition_mode == "image_level":
+        client_names = [f"hospital_{i + 1}" for i in range(config.clients)]
+        client_indices, client_val_indices, client_test_indices, val_indices, test_indices = make_image_level_federated_splits(
+            frame, config.clients, config.dirichlet_alpha, config.train_fraction,
+            config.val_fraction, config.split_seed,
         )
     else:
         client_names = [f"hospital_{i + 1}" for i in range(config.clients)]
@@ -201,6 +207,14 @@ def main():
         "test": test_metrics,
         "client_names": client_names,
         "partition_mode": config.partition_mode,
+        "protocol_label": (
+            "paper protocol (image-level split)" if config.partition_mode == "image_level"
+            else "lesion-grouped primary"
+        ),
+        "lesion_leakage_warning": (
+            "Image-level replication may place images from the same lesion in different partitions."
+            if config.partition_mode == "image_level" else None
+        ),
     }
     pd.DataFrame(matrix, index=class_names, columns=class_names).to_csv(output / "confusion_matrix.csv")
     pd.DataFrame(raw_matrix, index=class_names, columns=class_names).to_csv(
@@ -255,6 +269,8 @@ def main():
         "final_federated_model_by_hospital": hospital_test_metrics,
         "client_names": client_names,
         "partition_mode": config.partition_mode,
+        "protocol_label": metrics_report["protocol_label"],
+        "lesion_leakage_warning": metrics_report["lesion_leakage_warning"],
         "combined_raw_argmax": raw_test_metrics,
         "combined_selected": test_metrics,
         "combined_test": test_metrics,

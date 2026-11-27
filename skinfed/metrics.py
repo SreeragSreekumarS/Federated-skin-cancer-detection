@@ -49,6 +49,9 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
             "precision": float(precision[i]), "positive_predictive_value": float(precision[i]),
             "sensitivity": float(recall[i]), "recall": float(recall[i]),
             "specificity": float(tn / (tn + fp)) if tn + fp else 0.0,
+            # One-vs-rest accuracy (TP + TN) / N; macro-average is reported
+            # separately from ordinary multiclass top-1 accuracy.
+            "one_vs_rest_accuracy": float((tp + tn) / matrix.sum()) if matrix.sum() else 0.0,
             "negative_predictive_value": float(tn / (tn + fn)) if tn + fn else 0.0,
             "false_positive_rate": float(fp / (fp + tn)) if fp + tn else 0.0,
             "false_negative_rate": float(fn / (fn + tp)) if fn + tp else 0.0,
@@ -70,6 +73,9 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
         if item["average_precision"] is not None
     ]
     macro_average_precision = float(np.mean(valid_average_precisions)) if valid_average_precisions else None
+    macro_ovr_accuracy = float(np.mean([
+        item["one_vs_rest_accuracy"] for item in per_class.values()
+    ])) if per_class else 0.0
     try:
         top_2_accuracy = top_k_accuracy_score(y_true, probabilities, k=min(2, len(labels)), labels=labels)
     except ValueError:
@@ -85,6 +91,7 @@ def classification_metrics(targets: list[int], probabilities: np.ndarray, class_
     )
     results = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_ovr_accuracy": macro_ovr_accuracy,
         "balanced_accuracy": float(recall[present].mean()) if present.any() else 0.0,
         "macro_f1_present": float(f1[present].mean()) if present.any() else 0.0,
         "macro_precision": float(macro_precision), "macro_recall": float(macro_recall), "macro_f1": float(macro_f1),

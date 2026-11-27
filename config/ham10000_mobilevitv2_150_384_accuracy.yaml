@@ -41,7 +41,7 @@ cutmix_alpha: 0.5
 mixup_cutmix_probability: 0.2
 fedprox_mu: 0.03
 focal_gamma: 0.0
-label_smoothing: 0.0
+label_smoothing: 0.05
 early_stopping_patience: 10
 freeze_backbone_rounds: 2
 train_fraction: 0.7

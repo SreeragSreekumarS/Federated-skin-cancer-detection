@@ -90,8 +90,8 @@ class TrainConfig:
             raise ValueError("class_weighting must be auto, inverse_frequency, or none")
         if not 0 <= self.hair_removal_probability <= 1:
             raise ValueError("hair_removal_probability must be in [0, 1]")
-        if self.partition_mode not in {"global", "hospital_first", "source"}:
-            raise ValueError("partition_mode must be global, hospital_first, or source")
+        if self.partition_mode not in {"global", "hospital_first", "source", "image_level"}:
+            raise ValueError("partition_mode must be global, hospital_first, source, or image_level")
         if self.aggregation_weighting not in {"samples", "quality"}:
             raise ValueError("aggregation_weighting must be samples or quality")
         if self.batchnorm_policy not in {"average", "freeze_stats"}:

@@ -11,7 +11,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
-from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, train_test_split
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -303,6 +303,57 @@ def make_federated_splits(
         )
     val_indices = np.concatenate(client_val)
     test_indices = np.concatenate(client_test)
+    return client_train, client_val, client_test, val_indices, test_indices
+
+
+def make_image_level_federated_splits(
+    frame: pd.DataFrame, clients: int, alpha: float, train: float, val: float, seed: int,
+):
+    """Paper-style image-level client allocation and local random splits.
+
+    This intentionally ignores patient/lesion groups and can leak images from
+    one lesion across train/validation/test. Use only as a labeled replication.
+    """
+    rng = np.random.default_rng(seed)
+    labels = frame.target.to_numpy()
+    client_rows: list[list[int]] = [[] for _ in range(clients)]
+    for label in np.unique(labels):
+        rows = np.flatnonzero(labels == label)
+        rng.shuffle(rows)
+        counts = rng.multinomial(len(rows), rng.dirichlet(np.repeat(alpha, clients)))
+        for client, shard in enumerate(np.split(rows, np.cumsum(counts)[:-1])):
+            client_rows[client].extend(shard.tolist())
+
+    client_train, client_val, client_test = [], [], []
+    for client, rows in enumerate(client_rows):
+        rows = np.asarray(rows, dtype=int)
+        client_labels = labels[rows]
+        try:
+            train_rows, holdout_rows = train_test_split(
+                rows, train_size=train, random_state=seed + client,
+                stratify=client_labels,
+            )
+            holdout_labels = labels[holdout_rows]
+            val_share = val / (1.0 - train)
+            val_rows, test_rows = train_test_split(
+                holdout_rows, train_size=val_share, random_state=seed + client + 1000,
+                stratify=holdout_labels,
+            )
+        except ValueError:
+            # Rare classes can make stratification impossible in small client shards.
+            train_rows, holdout_rows = train_test_split(
+                rows, train_size=train, random_state=seed + client,
+            )
+            val_rows, test_rows = train_test_split(
+                holdout_rows, train_size=val / (1.0 - train), random_state=seed + client + 1000,
+            )
+        client_train.append(np.asarray(train_rows, dtype=int))
+        client_val.append(np.asarray(val_rows, dtype=int))
+        client_test.append(np.asarray(test_rows, dtype=int))
+
+    val_indices = np.concatenate(client_val)
+    test_indices = np.concatenate(client_test)
+    print("WARNING: image-level replication split; lesion groups may cross train/validation/test.")
     return client_train, client_val, client_test, val_indices, test_indices
 
 
